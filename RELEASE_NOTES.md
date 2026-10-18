@@ -1,7 +1,8 @@
-## 1.0.3
+## 1.0.4
 
-- Add English installation, setup, safety boundaries and attribution documentation for the Obsidian Community directory.
-- Point manifest authorUrl to the maintainer profile.
-- Includes all reliability fixes and 71 passing assertions from 1.0.2. No sync behavior change.
+- Address the community scanner UI errors: use Setting headings and CSS classes for settings and modal layouts.
+- Keep dynamic pairing controls hidden until generation completes and use severity classes for log colors.
+- Clarify desktop-only setup help; includes English documentation and all reliability fixes from 1.0.2.
+- Typecheck, 71 reliability assertions, and production build pass.
 
-Desktop only; Obsidian 1.14.4 or later. Community review is in progress.
+Requires desktop Obsidian 1.14.4+. Community directory automated review is in progress.

@@ -38,26 +38,26 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     // Title
-    containerEl.createEl("h1", { text: "百度网盘同步设置 (Baidu Netdisk Sync)" });
+    new Setting(containerEl).setName("百度网盘同步设置 (Baidu Netdisk Sync)").setHeading();
 
     // --- Section 1: Detailed OAuth & Credential Guide ---
-    containerEl.createEl("h2", { text: "1. 百度网盘账号授权 (OAuth 2.0)" });
+    new Setting(containerEl).setName("1. 百度网盘账号授权 (OAuth 2.0)").setHeading();
 
     const guideBox = containerEl.createDiv({ cls: "baidu-sync-card" });
-    guideBox.style.lineHeight = "1.6";
-    guideBox.style.fontSize = "13px";
+    guideBox.addClass("baidu-sync-ui-1");
+    guideBox.addClass("baidu-sync-ui-2");
 
     const titleEl = guideBox.createEl("div", {
       cls: "baidu-sync-card-title",
       text: "📖 凭证获取详细保姆级操作指南（只需操作一次）：",
     });
-    titleEl.style.fontSize = "14px";
-    titleEl.style.fontWeight = "600";
-    titleEl.style.marginBottom = "6px";
+    titleEl.addClass("baidu-sync-ui-3");
+    titleEl.addClass("baidu-sync-ui-4");
+    titleEl.addClass("baidu-sync-ui-5");
 
     const ol = guideBox.createEl("ol");
-    ol.style.margin = "0 0 10px 18px";
-    ol.style.padding = "0";
+    ol.addClass("baidu-sync-ui-6");
+    ol.addClass("baidu-sync-ui-7");
 
     const li1 = ol.createEl("li");
     li1.appendText("访问 ");
@@ -65,8 +65,8 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
       text: "百度网盘开放平台控制台 (pan.baidu.com/union)",
       href: "https://pan.baidu.com/union/console/applist",
     });
-    linkUnion.style.color = "var(--text-accent)";
-    linkUnion.style.textDecoration = "underline";
+    linkUnion.addClass("baidu-sync-ui-8");
+    linkUnion.addClass("baidu-sync-ui-9");
     li1.appendText(" 并登录百度个人账号（首次进入点击注册开发者，普通个人账号即可快速开通）。");
 
     const li2 = ol.createEl("li");
@@ -85,10 +85,10 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
     li4.appendText("点击下方的【1. 获取网页授权码】，在弹出的官方页面登录并授权，将网页返回的授权码粘贴至下方输入框，点击【2. 兑换并保存 Token】即可自动完成绑定！");
 
     const tipDiv = guideBox.createDiv();
-    tipDiv.style.fontSize = "12px";
-    tipDiv.style.color = "var(--text-muted)";
-    tipDiv.style.marginTop = "6px";
-    tipDiv.innerHTML = "💡 <b>小贴士：</b>如果后续需要在手机/平板等移动端使用，无需在手机上重复申请凭证！配置完成后，直接使用下方【2. 多设备快速配对】导出加密配对码，在手机端一键导入即可。";
+    tipDiv.addClass("baidu-sync-ui-10");
+    tipDiv.addClass("baidu-sync-ui-11");
+    tipDiv.addClass("baidu-sync-ui-12");
+    tipDiv.setText("配置完成后可使用加密配对码迁移到另一台桌面设备。当前版本仅支持桌面端。");
 
     // App Key Input
     new Setting(containerEl)
@@ -215,7 +215,7 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
       );
 
     // --- Section 2: Multi-Device Quick Pairing ---
-    containerEl.createEl("h2", { text: "2. 多设备快速配对与配置迁移 (Multi-Device Fast Pairing)" });
+    new Setting(containerEl).setName("2. 多设备快速配对与配置迁移 (Multi-Device Fast Pairing)").setHeading();
 
     new Setting(containerEl)
       .setName("跨端配置导出与导入")
@@ -250,7 +250,7 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
       );
 
     // --- Section 3: End-to-End Encryption ---
-    containerEl.createEl("h2", { text: "3. 端到端零知识加密 (E2EE)" });
+    new Setting(containerEl).setName("3. 端到端零知识加密 (E2EE)").setHeading();
 
     new Setting(containerEl)
       .setName("启用端到端加密")
@@ -279,7 +279,7 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
     }
 
     // --- Section 4: Sync & Ordering Configuration ---
-    containerEl.createEl("h2", { text: "4. 同步与时序设置 (Sync & Ordering Configuration)" });
+    new Setting(containerEl).setName("4. 同步与时序设置 (Sync & Ordering Configuration)").setHeading();
 
     new Setting(containerEl)
       .setName("网盘备份根路径")
@@ -349,7 +349,7 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
       );
 
     // --- Section 5: Conflict Strategy ---
-    containerEl.createEl("h2", { text: "5. 冲突与数据保护策略 (Conflict Resolution)" });
+    new Setting(containerEl).setName("5. 冲突与数据保护策略 (Conflict Resolution)").setHeading();
 
     new Setting(containerEl)
       .setName("冲突解决策略")
@@ -417,7 +417,7 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
       );
 
     // --- Section 6: Actions & Logs ---
-    containerEl.createEl("h2", { text: "6. 手动操作与日志 (Actions & Logs)" });
+    new Setting(containerEl).setName("6. 手动操作与日志 (Actions & Logs)").setHeading();
 
     new Setting(containerEl)
       .setName("全量双向同步")
@@ -452,7 +452,7 @@ class ConfigExportModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
 
-    contentEl.createEl("h2", { text: "📤 导出受保护的配对码" });
+    new Setting(contentEl).setName("📤 导出受保护的配对码").setHeading();
     contentEl.createEl("p", {
       text: "请设置一个临时的保护密码（PIN 码），用于加密当前所有百度网盘授权凭据与同步配置：",
     });
@@ -461,9 +461,9 @@ class ConfigExportModal extends Modal {
       type: "password",
       placeholder: "设置临时配对密码",
     });
-    pinInput.style.width = "100%";
-    pinInput.style.marginBottom = "12px";
-    pinInput.style.padding = "8px";
+    pinInput.addClass("baidu-sync-ui-13");
+    pinInput.addClass("baidu-sync-ui-14");
+    pinInput.addClass("baidu-sync-ui-15");
 
     const btnContainer = contentEl.createDiv();
     const generateBtn = btnContainer.createEl("button", {
@@ -472,17 +472,17 @@ class ConfigExportModal extends Modal {
     });
 
     const resultArea = contentEl.createEl("textarea");
-    resultArea.style.width = "100%";
-    resultArea.style.height = "120px";
-    resultArea.style.marginTop = "12px";
-    resultArea.style.display = "none";
+    resultArea.addClass("baidu-sync-ui-13");
+    resultArea.addClass("baidu-sync-ui-16");
+    resultArea.addClass("baidu-sync-ui-17");
+    resultArea.addClass("baidu-sync-hidden");
     resultArea.readOnly = true;
 
     const copyBtn = contentEl.createEl("button", {
       text: "📋 复制配对码",
     });
-    copyBtn.style.marginTop = "8px";
-    copyBtn.style.display = "none";
+    copyBtn.addClass("baidu-sync-ui-18");
+    copyBtn.addClass("baidu-sync-hidden");
 
     generateBtn.onclick = async () => {
       const pin = pinInput.value.trim();
@@ -494,8 +494,8 @@ class ConfigExportModal extends Modal {
         const code = await exportEncryptedConfig(this.settings, pin);
         this.generatedCode = code;
         resultArea.value = code;
-        resultArea.style.display = "block";
-        copyBtn.style.display = "inline-block";
+        resultArea.removeClass("baidu-sync-hidden");
+        copyBtn.removeClass("baidu-sync-hidden");
         new Notice("配对码生成成功！请点击复制。");
       } catch (err: any) {
         new Notice(`生成失败: ${err.message || String(err)}`);
@@ -525,7 +525,7 @@ class ConfigImportModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
 
-    contentEl.createEl("h2", { text: "📥 导入外部设备配置" });
+    new Setting(contentEl).setName("📥 导入外部设备配置").setHeading();
     contentEl.createEl("p", {
       text: "粘贴从其他设备导出的配对码（以 BDSYNC:v1: 开头），并输入导出时设置的保护密码：",
     });
@@ -533,17 +533,17 @@ class ConfigImportModal extends Modal {
     const codeArea = contentEl.createEl("textarea", {
       placeholder: "粘贴配对码 (BDSYNC:v1:...)",
     });
-    codeArea.style.width = "100%";
-    codeArea.style.height = "100px";
-    codeArea.style.marginBottom = "10px";
+    codeArea.addClass("baidu-sync-ui-13");
+    codeArea.addClass("baidu-sync-ui-19");
+    codeArea.addClass("baidu-sync-ui-20");
 
     const pinInput = contentEl.createEl("input", {
       type: "password",
       placeholder: "输入配对保护密码",
     });
-    pinInput.style.width = "100%";
-    pinInput.style.marginBottom = "16px";
-    pinInput.style.padding = "8px";
+    pinInput.addClass("baidu-sync-ui-13");
+    pinInput.addClass("baidu-sync-ui-21");
+    pinInput.addClass("baidu-sync-ui-15");
 
     const applyBtn = contentEl.createEl("button", {
       text: "解密并应用配置",
@@ -591,7 +591,7 @@ class SyncLogModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
 
-    contentEl.createEl("h2", { text: "📜 百度网盘同步日志 (最近 200 条)" });
+    new Setting(contentEl).setName("📜 百度网盘同步日志 (最近 200 条)").setHeading();
 
     if (this.logs.length === 0) {
       contentEl.createEl("p", { text: "暂无同步日志记录。" });
@@ -599,27 +599,20 @@ class SyncLogModal extends Modal {
     }
 
     const logContainer = contentEl.createDiv({ cls: "baidu-sync-log-container" });
-    logContainer.style.maxHeight = "400px";
-    logContainer.style.overflowY = "auto";
-    logContainer.style.fontFamily = "monospace";
-    logContainer.style.fontSize = "12px";
-    logContainer.style.backgroundColor = "var(--background-secondary)";
-    logContainer.style.padding = "10px";
-    logContainer.style.borderRadius = "6px";
+    logContainer.addClass("baidu-sync-ui-22");
+    logContainer.addClass("baidu-sync-ui-23");
+    logContainer.addClass("baidu-sync-ui-24");
+    logContainer.addClass("baidu-sync-ui-10");
+    logContainer.addClass("baidu-sync-ui-25");
+    logContainer.addClass("baidu-sync-ui-26");
+    logContainer.addClass("baidu-sync-ui-27");
 
     for (const log of this.logs) {
       const dateStr = new Date(log.timestamp).toLocaleTimeString();
       const line = logContainer.createDiv({ cls: `baidu-sync-log-${log.level}` });
-      line.style.marginBottom = "4px";
+      line.addClass("baidu-sync-ui-28");
 
-      const colorMap: Record<string, string> = {
-        info: "var(--text-normal)",
-        success: "var(--text-success, #48c774)",
-        warn: "var(--text-warning, #ffdd57)",
-        error: "var(--text-error, #f14668)",
-      };
 
-      line.style.color = colorMap[log.level] || "var(--text-normal)";
       line.setText(`[${dateStr}] [${log.level.toUpperCase()}] ${log.message}${log.detail ? ` (${log.detail})` : ""}`);
     }
   }

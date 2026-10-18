@@ -775,29 +775,29 @@ var BaiduSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h1", { text: "\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u8BBE\u7F6E (Baidu Netdisk Sync)" });
-    containerEl.createEl("h2", { text: "1. \u767E\u5EA6\u7F51\u76D8\u8D26\u53F7\u6388\u6743 (OAuth 2.0)" });
+    new import_obsidian2.Setting(containerEl).setName("\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u8BBE\u7F6E (Baidu Netdisk Sync)").setHeading();
+    new import_obsidian2.Setting(containerEl).setName("1. \u767E\u5EA6\u7F51\u76D8\u8D26\u53F7\u6388\u6743 (OAuth 2.0)").setHeading();
     const guideBox = containerEl.createDiv({ cls: "baidu-sync-card" });
-    guideBox.style.lineHeight = "1.6";
-    guideBox.style.fontSize = "13px";
+    guideBox.addClass("baidu-sync-ui-1");
+    guideBox.addClass("baidu-sync-ui-2");
     const titleEl = guideBox.createEl("div", {
       cls: "baidu-sync-card-title",
       text: "\u{1F4D6} \u51ED\u8BC1\u83B7\u53D6\u8BE6\u7EC6\u4FDD\u59C6\u7EA7\u64CD\u4F5C\u6307\u5357\uFF08\u53EA\u9700\u64CD\u4F5C\u4E00\u6B21\uFF09\uFF1A"
     });
-    titleEl.style.fontSize = "14px";
-    titleEl.style.fontWeight = "600";
-    titleEl.style.marginBottom = "6px";
+    titleEl.addClass("baidu-sync-ui-3");
+    titleEl.addClass("baidu-sync-ui-4");
+    titleEl.addClass("baidu-sync-ui-5");
     const ol = guideBox.createEl("ol");
-    ol.style.margin = "0 0 10px 18px";
-    ol.style.padding = "0";
+    ol.addClass("baidu-sync-ui-6");
+    ol.addClass("baidu-sync-ui-7");
     const li1 = ol.createEl("li");
     li1.appendText("\u8BBF\u95EE ");
     const linkUnion = li1.createEl("a", {
       text: "\u767E\u5EA6\u7F51\u76D8\u5F00\u653E\u5E73\u53F0\u63A7\u5236\u53F0 (pan.baidu.com/union)",
       href: "https://pan.baidu.com/union/console/applist"
     });
-    linkUnion.style.color = "var(--text-accent)";
-    linkUnion.style.textDecoration = "underline";
+    linkUnion.addClass("baidu-sync-ui-8");
+    linkUnion.addClass("baidu-sync-ui-9");
     li1.appendText(" \u5E76\u767B\u5F55\u767E\u5EA6\u4E2A\u4EBA\u8D26\u53F7\uFF08\u9996\u6B21\u8FDB\u5165\u70B9\u51FB\u6CE8\u518C\u5F00\u53D1\u8005\uFF0C\u666E\u901A\u4E2A\u4EBA\u8D26\u53F7\u5373\u53EF\u5FEB\u901F\u5F00\u901A\uFF09\u3002");
     const li2 = ol.createEl("li");
     li2.appendText("\u5728\u63A7\u5236\u53F0\u70B9\u51FB\u3010\u521B\u5EFA\u5E94\u7528\u3011\uFF0C\u5E94\u7528\u7C7B\u522B\u9009\u62E9\u3010\u8F6F\u4EF6\u3011\u6216\u3010\u79FB\u52A8/\u684C\u9762\u5E94\u7528\u3011\uFF0C\u5E94\u7528\u540D\u79F0\u4EFB\u610F\u586B\u5199\uFF08\u4F8B\u5982 ");
@@ -812,10 +812,10 @@ var BaiduSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
     const li4 = ol.createEl("li");
     li4.appendText("\u70B9\u51FB\u4E0B\u65B9\u7684\u30101. \u83B7\u53D6\u7F51\u9875\u6388\u6743\u7801\u3011\uFF0C\u5728\u5F39\u51FA\u7684\u5B98\u65B9\u9875\u9762\u767B\u5F55\u5E76\u6388\u6743\uFF0C\u5C06\u7F51\u9875\u8FD4\u56DE\u7684\u6388\u6743\u7801\u7C98\u8D34\u81F3\u4E0B\u65B9\u8F93\u5165\u6846\uFF0C\u70B9\u51FB\u30102. \u5151\u6362\u5E76\u4FDD\u5B58 Token\u3011\u5373\u53EF\u81EA\u52A8\u5B8C\u6210\u7ED1\u5B9A\uFF01");
     const tipDiv = guideBox.createDiv();
-    tipDiv.style.fontSize = "12px";
-    tipDiv.style.color = "var(--text-muted)";
-    tipDiv.style.marginTop = "6px";
-    tipDiv.innerHTML = "\u{1F4A1} <b>\u5C0F\u8D34\u58EB\uFF1A</b>\u5982\u679C\u540E\u7EED\u9700\u8981\u5728\u624B\u673A/\u5E73\u677F\u7B49\u79FB\u52A8\u7AEF\u4F7F\u7528\uFF0C\u65E0\u9700\u5728\u624B\u673A\u4E0A\u91CD\u590D\u7533\u8BF7\u51ED\u8BC1\uFF01\u914D\u7F6E\u5B8C\u6210\u540E\uFF0C\u76F4\u63A5\u4F7F\u7528\u4E0B\u65B9\u30102. \u591A\u8BBE\u5907\u5FEB\u901F\u914D\u5BF9\u3011\u5BFC\u51FA\u52A0\u5BC6\u914D\u5BF9\u7801\uFF0C\u5728\u624B\u673A\u7AEF\u4E00\u952E\u5BFC\u5165\u5373\u53EF\u3002";
+    tipDiv.addClass("baidu-sync-ui-10");
+    tipDiv.addClass("baidu-sync-ui-11");
+    tipDiv.addClass("baidu-sync-ui-12");
+    tipDiv.setText("\u914D\u7F6E\u5B8C\u6210\u540E\u53EF\u4F7F\u7528\u52A0\u5BC6\u914D\u5BF9\u7801\u8FC1\u79FB\u5230\u53E6\u4E00\u53F0\u684C\u9762\u8BBE\u5907\u3002\u5F53\u524D\u7248\u672C\u4EC5\u652F\u6301\u684C\u9762\u7AEF\u3002");
     new import_obsidian2.Setting(containerEl).setName("AppKey (Client ID)").setDesc("\u767E\u5EA6\u5F00\u653E\u5E73\u53F0\u5E94\u7528\u5BF9\u5E94\u7684 AppKey").addText(
       (text) => text.setPlaceholder("\u8BF7\u586B\u5165\u5E94\u7528\u7684 AppKey").setValue(this.plugin.settings.appKey).onChange(async (value) => {
         this.plugin.settings.appKey = value.trim();
@@ -899,7 +899,7 @@ var BaiduSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
         }
       })
     );
-    containerEl.createEl("h2", { text: "2. \u591A\u8BBE\u5907\u5FEB\u901F\u914D\u5BF9\u4E0E\u914D\u7F6E\u8FC1\u79FB (Multi-Device Fast Pairing)" });
+    new import_obsidian2.Setting(containerEl).setName("2. \u591A\u8BBE\u5907\u5FEB\u901F\u914D\u5BF9\u4E0E\u914D\u7F6E\u8FC1\u79FB (Multi-Device Fast Pairing)").setHeading();
     new import_obsidian2.Setting(containerEl).setName("\u8DE8\u7AEF\u914D\u7F6E\u5BFC\u51FA\u4E0E\u5BFC\u5165").setDesc("\u4EC5\u9700\u5728\u7535\u8111\u7AEF\u914D\u7F6E\u4E00\u6B21\uFF0C\u5BFC\u51FA\u53D7 AES-256-GCM \u5BC6\u7801\u4FDD\u62A4\u7684\u914D\u5BF9\u7801\uFF1B\u624B\u673A/\u5E73\u677F\u7AEF\u4E00\u952E\u7C98\u8D34\u5BFC\u5165\uFF0C\u79D2\u7EA7\u7EC4\u7F51\uFF01").addButton(
       (btn) => btn.setButtonText("\u{1F4E4} \u5BFC\u51FA\u52A0\u5BC6\u914D\u5BF9\u7801").onClick(() => {
         new ConfigExportModal(this.app, this.plugin.settings).open();
@@ -927,7 +927,7 @@ var BaiduSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
         }).open();
       })
     );
-    containerEl.createEl("h2", { text: "3. \u7AEF\u5230\u7AEF\u96F6\u77E5\u8BC6\u52A0\u5BC6 (E2EE)" });
+    new import_obsidian2.Setting(containerEl).setName("3. \u7AEF\u5230\u7AEF\u96F6\u77E5\u8BC6\u52A0\u5BC6 (E2EE)").setHeading();
     new import_obsidian2.Setting(containerEl).setName("\u542F\u7528\u7AEF\u5230\u7AEF\u52A0\u5BC6").setDesc("\u6587\u4EF6\u4E0A\u4F20\u524D\u5728\u672C\u5730\u7ECF\u7531 AES-256-GCM + PBKDF2 \u9AD8\u5F3A\u5EA6\u52A0\u5BC6\uFF0C\u7F51\u76D8\u7AEF\u4EC5\u5B58\u653E\u5BC6\u6587\uFF0C\u9632\u8303\u9690\u79C1\u6CC4\u9732\u4E0E\u626B\u63CF").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.enableE2EE).onChange(async (val) => {
         this.plugin.settings.enableE2EE = val;
@@ -943,7 +943,7 @@ var BaiduSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
         })
       );
     }
-    containerEl.createEl("h2", { text: "4. \u540C\u6B65\u4E0E\u65F6\u5E8F\u8BBE\u7F6E (Sync & Ordering Configuration)" });
+    new import_obsidian2.Setting(containerEl).setName("4. \u540C\u6B65\u4E0E\u65F6\u5E8F\u8BBE\u7F6E (Sync & Ordering Configuration)").setHeading();
     new import_obsidian2.Setting(containerEl).setName("\u7F51\u76D8\u5907\u4EFD\u6839\u8DEF\u5F84").setDesc("\u767E\u5EA6\u7F51\u76D8\u4E2D\u5B58\u653E\u6B64\u77E5\u8BC6\u5E93\u7684\u7EDD\u5BF9\u76EE\u5F55\u8DEF\u5F84\uFF08\u4EE5 / \u5F00\u5934\uFF0C\u4F8B\u5982 /apps/obsidian-vault\uFF09").addText(
       (text) => text.setPlaceholder("/apps/obsidian-vault").setValue(this.plugin.settings.remoteBasePath).onChange(async (val) => {
         this.plugin.settings.remoteBasePath = val.trim();
@@ -982,7 +982,7 @@ var BaiduSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
         }
       })
     );
-    containerEl.createEl("h2", { text: "5. \u51B2\u7A81\u4E0E\u6570\u636E\u4FDD\u62A4\u7B56\u7565 (Conflict Resolution)" });
+    new import_obsidian2.Setting(containerEl).setName("5. \u51B2\u7A81\u4E0E\u6570\u636E\u4FDD\u62A4\u7B56\u7565 (Conflict Resolution)").setHeading();
     new import_obsidian2.Setting(containerEl).setName("\u51B2\u7A81\u89E3\u51B3\u7B56\u7565").setDesc("\u5F53\u672C\u5730\u4E0E\u7F51\u76D8\u540C\u65F6\u4FEE\u6539\u4EA7\u751F\u5206\u6B67\u65F6\u7684\u88C1\u51B3\u673A\u5236").addDropdown(
       (drop) => drop.addOption("create_conflict_file", "\u5B89\u5168\u5206\u652F\u526F\u672C (\u63A8\u8350\uFF1A\u96F6\u6570\u636E\u4E22\u5931\uFF0C\u4FDD\u7559\u672C\u5730\u5E76\u751F\u6210\u51B2\u7A81\u6587\u4EF6)").addOption("keep_newer", "\u4EE5\u8F83\u65B0\u4FEE\u6539\u65F6\u95F4\u4E3A\u51C6 (Last-Write-Wins)").addOption("keep_local", "\u5F3A\u5236\u4EE5\u672C\u5730\u4E3A\u51C6 (\u8986\u76D6\u8FDC\u7AEF)").addOption("keep_remote", "\u5F3A\u5236\u4EE5\u8FDC\u7AEF\u4E3A\u51C6 (\u8986\u76D6\u672C\u5730)").setValue(this.plugin.settings.conflictStrategy).onChange(async (val) => {
         this.plugin.settings.conflictStrategy = val;
@@ -1016,7 +1016,7 @@ var BaiduSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    containerEl.createEl("h2", { text: "6. \u624B\u52A8\u64CD\u4F5C\u4E0E\u65E5\u5FD7 (Actions & Logs)" });
+    new import_obsidian2.Setting(containerEl).setName("6. \u624B\u52A8\u64CD\u4F5C\u4E0E\u65E5\u5FD7 (Actions & Logs)").setHeading();
     new import_obsidian2.Setting(containerEl).setName("\u5168\u91CF\u53CC\u5411\u540C\u6B65").setDesc("\u7ACB\u5373\u6309\u4E25\u683C\u65F6\u95F4\u987A\u5E8F\u548C\u539F\u5B50\u68C0\u67E5\u673A\u5236\u6267\u884C\u6BD4\u5BF9\u4E0E\u540C\u6B65").addButton(
       (btn) => btn.setButtonText("\u7ACB\u5373\u540C\u6B65").setCta().onClick(async () => {
         await this.plugin.runSync();
@@ -1037,7 +1037,7 @@ var ConfigExportModal = class extends import_obsidian2.Modal {
   onOpen() {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h2", { text: "\u{1F4E4} \u5BFC\u51FA\u53D7\u4FDD\u62A4\u7684\u914D\u5BF9\u7801" });
+    new import_obsidian2.Setting(contentEl).setName("\u{1F4E4} \u5BFC\u51FA\u53D7\u4FDD\u62A4\u7684\u914D\u5BF9\u7801").setHeading();
     contentEl.createEl("p", {
       text: "\u8BF7\u8BBE\u7F6E\u4E00\u4E2A\u4E34\u65F6\u7684\u4FDD\u62A4\u5BC6\u7801\uFF08PIN \u7801\uFF09\uFF0C\u7528\u4E8E\u52A0\u5BC6\u5F53\u524D\u6240\u6709\u767E\u5EA6\u7F51\u76D8\u6388\u6743\u51ED\u636E\u4E0E\u540C\u6B65\u914D\u7F6E\uFF1A"
     });
@@ -1045,25 +1045,25 @@ var ConfigExportModal = class extends import_obsidian2.Modal {
       type: "password",
       placeholder: "\u8BBE\u7F6E\u4E34\u65F6\u914D\u5BF9\u5BC6\u7801"
     });
-    pinInput.style.width = "100%";
-    pinInput.style.marginBottom = "12px";
-    pinInput.style.padding = "8px";
+    pinInput.addClass("baidu-sync-ui-13");
+    pinInput.addClass("baidu-sync-ui-14");
+    pinInput.addClass("baidu-sync-ui-15");
     const btnContainer = contentEl.createDiv();
     const generateBtn = btnContainer.createEl("button", {
       text: "\u751F\u6210\u52A0\u5BC6\u914D\u5BF9\u7801",
       cls: "mod-cta"
     });
     const resultArea = contentEl.createEl("textarea");
-    resultArea.style.width = "100%";
-    resultArea.style.height = "120px";
-    resultArea.style.marginTop = "12px";
-    resultArea.style.display = "none";
+    resultArea.addClass("baidu-sync-ui-13");
+    resultArea.addClass("baidu-sync-ui-16");
+    resultArea.addClass("baidu-sync-ui-17");
+    resultArea.addClass("baidu-sync-hidden");
     resultArea.readOnly = true;
     const copyBtn = contentEl.createEl("button", {
       text: "\u{1F4CB} \u590D\u5236\u914D\u5BF9\u7801"
     });
-    copyBtn.style.marginTop = "8px";
-    copyBtn.style.display = "none";
+    copyBtn.addClass("baidu-sync-ui-18");
+    copyBtn.addClass("baidu-sync-hidden");
     generateBtn.onclick = async () => {
       const pin = pinInput.value.trim();
       if (!pin) {
@@ -1074,8 +1074,8 @@ var ConfigExportModal = class extends import_obsidian2.Modal {
         const code = await exportEncryptedConfig(this.settings, pin);
         this.generatedCode = code;
         resultArea.value = code;
-        resultArea.style.display = "block";
-        copyBtn.style.display = "inline-block";
+        resultArea.removeClass("baidu-sync-hidden");
+        copyBtn.removeClass("baidu-sync-hidden");
         new import_obsidian2.Notice("\u914D\u5BF9\u7801\u751F\u6210\u6210\u529F\uFF01\u8BF7\u70B9\u51FB\u590D\u5236\u3002");
       } catch (err) {
         new import_obsidian2.Notice(`\u751F\u6210\u5931\u8D25: ${err.message || String(err)}`);
@@ -1098,23 +1098,23 @@ var ConfigImportModal = class extends import_obsidian2.Modal {
   onOpen() {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h2", { text: "\u{1F4E5} \u5BFC\u5165\u5916\u90E8\u8BBE\u5907\u914D\u7F6E" });
+    new import_obsidian2.Setting(contentEl).setName("\u{1F4E5} \u5BFC\u5165\u5916\u90E8\u8BBE\u5907\u914D\u7F6E").setHeading();
     contentEl.createEl("p", {
       text: "\u7C98\u8D34\u4ECE\u5176\u4ED6\u8BBE\u5907\u5BFC\u51FA\u7684\u914D\u5BF9\u7801\uFF08\u4EE5 BDSYNC:v1: \u5F00\u5934\uFF09\uFF0C\u5E76\u8F93\u5165\u5BFC\u51FA\u65F6\u8BBE\u7F6E\u7684\u4FDD\u62A4\u5BC6\u7801\uFF1A"
     });
     const codeArea = contentEl.createEl("textarea", {
       placeholder: "\u7C98\u8D34\u914D\u5BF9\u7801 (BDSYNC:v1:...)"
     });
-    codeArea.style.width = "100%";
-    codeArea.style.height = "100px";
-    codeArea.style.marginBottom = "10px";
+    codeArea.addClass("baidu-sync-ui-13");
+    codeArea.addClass("baidu-sync-ui-19");
+    codeArea.addClass("baidu-sync-ui-20");
     const pinInput = contentEl.createEl("input", {
       type: "password",
       placeholder: "\u8F93\u5165\u914D\u5BF9\u4FDD\u62A4\u5BC6\u7801"
     });
-    pinInput.style.width = "100%";
-    pinInput.style.marginBottom = "16px";
-    pinInput.style.padding = "8px";
+    pinInput.addClass("baidu-sync-ui-13");
+    pinInput.addClass("baidu-sync-ui-21");
+    pinInput.addClass("baidu-sync-ui-15");
     const applyBtn = contentEl.createEl("button", {
       text: "\u89E3\u5BC6\u5E76\u5E94\u7528\u914D\u7F6E",
       cls: "mod-cta"
@@ -1152,30 +1152,23 @@ var SyncLogModal = class extends import_obsidian2.Modal {
   onOpen() {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h2", { text: "\u{1F4DC} \u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u65E5\u5FD7 (\u6700\u8FD1 200 \u6761)" });
+    new import_obsidian2.Setting(contentEl).setName("\u{1F4DC} \u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u65E5\u5FD7 (\u6700\u8FD1 200 \u6761)").setHeading();
     if (this.logs.length === 0) {
       contentEl.createEl("p", { text: "\u6682\u65E0\u540C\u6B65\u65E5\u5FD7\u8BB0\u5F55\u3002" });
       return;
     }
     const logContainer = contentEl.createDiv({ cls: "baidu-sync-log-container" });
-    logContainer.style.maxHeight = "400px";
-    logContainer.style.overflowY = "auto";
-    logContainer.style.fontFamily = "monospace";
-    logContainer.style.fontSize = "12px";
-    logContainer.style.backgroundColor = "var(--background-secondary)";
-    logContainer.style.padding = "10px";
-    logContainer.style.borderRadius = "6px";
+    logContainer.addClass("baidu-sync-ui-22");
+    logContainer.addClass("baidu-sync-ui-23");
+    logContainer.addClass("baidu-sync-ui-24");
+    logContainer.addClass("baidu-sync-ui-10");
+    logContainer.addClass("baidu-sync-ui-25");
+    logContainer.addClass("baidu-sync-ui-26");
+    logContainer.addClass("baidu-sync-ui-27");
     for (const log of this.logs) {
       const dateStr = new Date(log.timestamp).toLocaleTimeString();
       const line = logContainer.createDiv({ cls: `baidu-sync-log-${log.level}` });
-      line.style.marginBottom = "4px";
-      const colorMap = {
-        info: "var(--text-normal)",
-        success: "var(--text-success, #48c774)",
-        warn: "var(--text-warning, #ffdd57)",
-        error: "var(--text-error, #f14668)"
-      };
-      line.style.color = colorMap[log.level] || "var(--text-normal)";
+      line.addClass("baidu-sync-ui-28");
       line.setText(`[${dateStr}] [${log.level.toUpperCase()}] ${log.message}${log.detail ? ` (${log.detail})` : ""}`);
     }
   }

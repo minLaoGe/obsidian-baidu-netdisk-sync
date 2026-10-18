@@ -24,3 +24,38 @@
   margin-bottom: 8px;
   color: var(--text-normal);
 }
+
+/* Settings and modal layout */
+.baidu-sync-hidden { display: none; }
+.baidu-sync-ui-1 { line-height: 1.6; }
+.baidu-sync-ui-2 { font-size: 13px; }
+.baidu-sync-ui-3 { font-size: 14px; }
+.baidu-sync-ui-4 { font-weight: 600; }
+.baidu-sync-ui-5 { margin-bottom: 6px; }
+.baidu-sync-ui-6 { margin: 0 0 10px 18px; }
+.baidu-sync-ui-7 { padding: 0; }
+.baidu-sync-ui-8 { color: var(--text-accent); }
+.baidu-sync-ui-9 { text-decoration: underline; }
+.baidu-sync-ui-10 { font-size: 12px; }
+.baidu-sync-ui-11 { color: var(--text-muted); }
+.baidu-sync-ui-12 { margin-top: 6px; }
+.baidu-sync-ui-13 { width: 100%; }
+.baidu-sync-ui-14 { margin-bottom: 12px; }
+.baidu-sync-ui-15 { padding: 8px; }
+.baidu-sync-ui-16 { height: 120px; }
+.baidu-sync-ui-17 { margin-top: 12px; }
+.baidu-sync-ui-18 { margin-top: 8px; }
+.baidu-sync-ui-19 { height: 100px; }
+.baidu-sync-ui-20 { margin-bottom: 10px; }
+.baidu-sync-ui-21 { margin-bottom: 16px; }
+.baidu-sync-ui-22 { max-height: 400px; }
+.baidu-sync-ui-23 { overflow-y: auto; }
+.baidu-sync-ui-24 { font-family: monospace; }
+.baidu-sync-ui-25 { background-color: var(--background-secondary); }
+.baidu-sync-ui-26 { padding: 10px; }
+.baidu-sync-ui-27 { border-radius: 6px; }
+.baidu-sync-ui-28 { margin-bottom: 4px; }
+.baidu-sync-log-info { color: var(--text-normal); }
+.baidu-sync-log-success { color: var(--text-success, #48c774); }
+.baidu-sync-log-warn { color: var(--text-warning, #ffdd57); }
+.baidu-sync-log-error { color: var(--text-error, #f14668); }
