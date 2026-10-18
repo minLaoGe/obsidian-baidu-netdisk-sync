@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.synctmp.*
+.obsidian/
+.trash/
+.DS_Store
+Thumbs.db

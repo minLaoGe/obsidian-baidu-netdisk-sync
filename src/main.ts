@@ -1,0 +1,158 @@
+import { Notice, Plugin } from "obsidian";
+import { BaiduClient } from "./api/baidu-client";
+import { BaiduSyncSettingTab, DEFAULT_SETTINGS } from "./settings";
+import { SyncEngine } from "./sync/engine";
+import { PluginSettings } from "./types";
+
+export default class BaiduNetdiskSyncPlugin extends Plugin {
+  settings: PluginSettings = DEFAULT_SETTINGS;
+  baiduClient!: BaiduClient;
+  syncEngine!: SyncEngine;
+  private statusBarItem!: HTMLElement;
+  private autoSyncIntervalId?: number;
+
+  async onload() {
+    console.log("Loading Baidu Netdisk Sync Plugin...");
+    await this.loadSettings();
+
+    // 1. Initialize Baidu API client
+    this.baiduClient = new BaiduClient({
+      appKey: this.settings.appKey,
+      secretKey: this.settings.secretKey,
+      accessToken: this.settings.accessToken,
+      refreshToken: this.settings.refreshToken,
+      tokenExpiresAt: this.settings.tokenExpiresAt,
+      onTokenRefreshed: async (tokenData) => {
+        this.settings.accessToken = tokenData.access_token;
+        this.settings.refreshToken = tokenData.refresh_token;
+        this.settings.tokenExpiresAt = Date.now() + tokenData.expires_in * 1000;
+        await this.saveSettings();
+      },
+    });
+
+    // 2. Initialize Status Bar
+    this.statusBarItem = this.addStatusBarItem();
+    this.updateStatusBar("就绪", false);
+
+    // 3. Initialize Sync Engine
+    this.syncEngine = new SyncEngine(
+      this.app,
+      () => this.settings,
+      this.baiduClient,
+      (statusText, isBusy) => {
+        this.updateStatusBar(statusText, isBusy);
+      }
+    );
+
+    await this.syncEngine.initialize();
+
+    // 4. Add Ribbon Icon for quick sync
+    this.addRibbonIcon("refresh-cw", "百度网盘同步", async () => {
+      await this.runSync();
+    });
+
+    // 5. Add Commands for command palette / hotkeys
+    this.addCommand({
+      id: "sync-baidu-netdisk",
+      name: "立即开始双向同步",
+      callback: async () => {
+        await this.runSync();
+      },
+    });
+
+    // 6. Register Setting Tab
+    this.addSettingTab(new BaiduSyncSettingTab(this.app, this));
+
+    // 7. Register Vault Event Listeners with Debounce Ordering
+    this.registerEvent(
+      this.app.vault.on("modify", (file) => {
+        this.syncEngine.handleLocalFileModified(file);
+      })
+    );
+
+    this.registerEvent(
+      this.app.vault.on("create", (file) => {
+        this.syncEngine.handleLocalFileModified(file);
+      })
+    );
+
+    this.registerEvent(
+      this.app.vault.on("delete", (file) => {
+        this.syncEngine.handleLocalFileDeleted(file);
+      })
+    );
+
+    this.registerEvent(
+      this.app.vault.on("rename", (file, oldPath) => {
+        // Handle rename as delete old + create new
+        this.syncEngine.handleLocalFileDeleted({ path: oldPath } as any);
+        this.syncEngine.handleLocalFileModified(file);
+      })
+    );
+
+    // 8. Auto Sync Timer
+    this.resetAutoSyncTimer();
+
+    // 9. Startup Sync
+    if (this.settings.syncOnStartup && this.settings.accessToken) {
+      setTimeout(() => {
+        this.runSync();
+      }, 3000); // Wait 3s after startup for vault index to be fully loaded
+    }
+  }
+
+  onunload() {
+    console.log("Unloading Baidu Netdisk Sync Plugin...");
+    if (this.autoSyncIntervalId) {
+      window.clearInterval(this.autoSyncIntervalId);
+    }
+  }
+
+  async loadSettings() {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+  }
+
+  async saveSettings() {
+    await this.saveData(this.settings);
+    if (this.baiduClient) {
+      this.baiduClient.updateCredentials(
+        this.settings.accessToken,
+        this.settings.refreshToken,
+        this.settings.tokenExpiresAt
+      );
+    }
+  }
+
+  public updateStatusBar(status: string, isBusy: boolean) {
+    if (!this.statusBarItem) return;
+    const icon = isBusy ? "⏳ " : "☁️ ";
+    this.statusBarItem.setText(`${icon}百度网盘: ${status}`);
+    this.statusBarItem.title = "点击执行百度网盘同步";
+    this.statusBarItem.onclick = () => {
+      this.runSync();
+    };
+  }
+
+  public async runSync() {
+    if (!this.settings.accessToken) {
+      new Notice("请先在设置中配置百度网盘 Access Token！");
+      return;
+    }
+    await this.syncEngine.runFullSync();
+  }
+
+  public resetAutoSyncTimer() {
+    if (this.autoSyncIntervalId) {
+      window.clearInterval(this.autoSyncIntervalId);
+      this.autoSyncIntervalId = undefined;
+    }
+
+    if (this.settings.autoSync && this.settings.syncIntervalMinutes > 0) {
+      const intervalMs = this.settings.syncIntervalMinutes * 60 * 1000;
+      this.autoSyncIntervalId = window.setInterval(() => {
+        this.runSync();
+      }, intervalMs);
+      console.log(`Auto sync scheduled every ${this.settings.syncIntervalMinutes} minutes.`);
+    }
+  }
+}

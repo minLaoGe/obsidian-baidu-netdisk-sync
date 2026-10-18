@@ -1,0 +1,26 @@
+/* Styles for Obsidian Baidu Netdisk Sync Plugin */
+
+.baidu-sync-status-busy {
+  color: var(--text-accent);
+  animation: baidu-sync-spin 2s linear infinite;
+}
+
+@keyframes baidu-sync-spin {
+  0% { opacity: 0.6; }
+  50% { opacity: 1; }
+  100% { opacity: 0.6; }
+}
+
+.baidu-sync-card {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  background-color: var(--background-secondary);
+}
+
+.baidu-sync-card-title {
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--text-normal);
+}
