@@ -1,7 +1,6 @@
 import { App } from "obsidian";
+import { AtomicFileSystem } from "../utils/atomic";
 import { SyncMetadataEntry, SyncStateData } from "../types";
-
-const DEFAULT_STATE_FILE_PATH = ".obsidian/plugins/baidu-sync/sync-state.json";
 
 /**
  * Manages the persistent synchronization state database with atomic write semantics.
@@ -12,17 +11,16 @@ export class SyncStateStore {
     lastFullSyncTimestamp: 0,
     files: {},
   };
-  private isLoaded: boolean = false;
   private isDirty: boolean = false;
   private saveLock: Promise<void> = Promise.resolve();
   private stateFilePath: string;
 
-  constructor(private app: App, stateFilePath: string = DEFAULT_STATE_FILE_PATH) {
+  constructor(private app: App, stateFilePath: string = `${app.vault.configDir || ".obsidian"}/plugins/baidu-sync/sync-state.json`) {
     this.stateFilePath = stateFilePath;
   }
 
   /**
-   * Load existing state from disk. If missing or corrupted, initializes safely.
+   * Load existing state; a corrupt baseline blocks sync instead of being discarded.
    */
   async load(): Promise<void> {
     const adapter = this.app.vault.adapter;
@@ -30,23 +28,19 @@ export class SyncStateStore {
       if (await adapter.exists(this.stateFilePath)) {
         const content = await adapter.read(this.stateFilePath);
         const parsed = JSON.parse(content);
-        if (parsed && typeof parsed.files === "object") {
+        if (parsed && parsed.files && typeof parsed.files === "object" && !Array.isArray(parsed.files)) {
           this.data = {
             version: parsed.version || 1,
             lastFullSyncTimestamp: parsed.lastFullSyncTimestamp || 0,
             files: parsed.files || {},
           };
+        } else {
+          throw new Error("Invalid sync state");
         }
       }
     } catch (err) {
-      console.warn("Failed to parse existing sync-state.json, initializing new state:", err);
-      this.data = {
-        version: 1,
-        lastFullSyncTimestamp: 0,
-        files: {},
-      };
+      throw new Error(`同步基线加载失败，已停止同步以保护现有文件: ${String(err)}`);
     }
-    this.isLoaded = true;
     this.isDirty = false;
   }
 
@@ -109,43 +103,13 @@ export class SyncStateStore {
   async save(): Promise<void> {
     if (!this.isDirty) return;
 
-    // Chain saves to avoid concurrent writing collisions
-    this.saveLock = this.saveLock.then(async () => {
-      const adapter = this.app.vault.adapter;
-      const jsonContent = JSON.stringify(this.data, null, 2);
-      
-      // Ensure plugin folder exists
-      const lastSlash = this.stateFilePath.lastIndexOf("/");
-      const pluginDir = lastSlash > 0 ? this.stateFilePath.substring(0, lastSlash) : ".obsidian/plugins/baidu-sync";
-      if (!(await adapter.exists(pluginDir))) {
-        await adapter.mkdir(pluginDir);
-      }
-
-      const tmpPath = `${this.stateFilePath}.tmp.${Date.now()}`;
-      try {
-        await adapter.write(tmpPath, jsonContent);
-        
-        // Verify tmp file by re-parsing
-        const verifyContent = await adapter.read(tmpPath);
-        JSON.parse(verifyContent);
-
-        // Atomic replace
-        if (await adapter.exists(this.stateFilePath)) {
-          await adapter.remove(this.stateFilePath);
-        }
-        await adapter.rename(tmpPath, this.stateFilePath);
-        this.isDirty = false;
-      } catch (err) {
-        try {
-          if (await adapter.exists(tmpPath)) {
-            await adapter.remove(tmpPath);
-          }
-        } catch (_) {}
-        console.error("Failed to atomically save sync-state.json:", err);
-        throw err;
-      }
+    // A failed save must not poison the queue or discard newer in-memory changes.
+    const task = this.saveLock.catch(() => undefined).then(async () => {
+      const json = JSON.stringify(this.data, null, 2);
+      await new AtomicFileSystem(this.app).atomicWrite(this.stateFilePath, json);
+      this.isDirty = JSON.stringify(this.data, null, 2) !== json;
     });
-
-    return this.saveLock;
+    this.saveLock = task;
+    return task;
   }
 }

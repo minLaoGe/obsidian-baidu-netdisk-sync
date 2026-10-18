@@ -37,8 +37,8 @@ export class SyncEngine {
   }
 
   public async initialize(): Promise<void> {
-    await this.stateStore.load();
     const { restored, cleaned } = await this.atomicFs.recoverCrashAndCleanStale();
+    await this.stateStore.load();
     if (restored > 0) {
       this.log("warn", `已自动执行崩溃恢复：成功从灾难备份还原了 ${restored} 个笔记文件！`);
       new Notice(`[BaiduSync] 崩溃恢复：已自动还原 ${restored} 个笔记文件！`);
@@ -85,7 +85,8 @@ export class SyncEngine {
     
     // Ignore internal temporary and system folders
     if (norm.startsWith(".trash/") || norm.startsWith(".git/")) return true;
-    if (norm.includes(".synctmp.")) return true;
+    const ownDir = `${this.app.vault.configDir || ".obsidian"}/plugins/baidu-sync`;
+    if (norm === ownDir || norm.startsWith(ownDir + "/")) return true;
 
     const settings = this.getSettings();
 
@@ -408,7 +409,8 @@ export class SyncEngine {
     if (decision.conflictSubtype === "remote_deleted_local_modified" || (local.exists && !remote.exists)) {
       let buffer = await this.atomicFs.readBinary(localPath);
       const localMd5 = local.md5 || calculateMd5(buffer);
-      if (settings.enableE2EE && settings.e2eePassword) {
+      if (settings.enableE2EE) {
+        if (!settings.e2eePassword?.trim()) throw new Error("已启用加密但缺少密码，已中止上传");
         buffer = await encryptData(buffer, settings.e2eePassword);
       }
       const uploadResult = await this.client.uploadFile(remotePath, buffer);
@@ -459,7 +461,8 @@ export class SyncEngine {
     if (strategy === "keep_local" && local.exists) {
       let buffer = await this.atomicFs.readBinary(localPath);
       const localMd5 = local.md5 || calculateMd5(buffer);
-      if (settings.enableE2EE && settings.e2eePassword) {
+      if (settings.enableE2EE) {
+        if (!settings.e2eePassword?.trim()) throw new Error("已启用加密但缺少密码，已中止上传");
         buffer = await encryptData(buffer, settings.e2eePassword);
       }
       const uploadResult = await this.client.uploadFile(remotePath, buffer);
@@ -506,7 +509,8 @@ export class SyncEngine {
       if (localMtime >= remoteMtime) {
         let buffer = await this.atomicFs.readBinary(localPath);
         const localMd5 = local.md5 || calculateMd5(buffer);
-        if (settings.enableE2EE && settings.e2eePassword) {
+        if (settings.enableE2EE) {
+          if (!settings.e2eePassword?.trim()) throw new Error("已启用加密但缺少密码，已中止上传");
           buffer = await encryptData(buffer, settings.e2eePassword);
         }
         const uploadResult = await this.client.uploadFile(remotePath, buffer);
@@ -549,6 +553,7 @@ export class SyncEngine {
     if (remote.exists && remote.fsId) {
       const conflictPath = generateConflictPath(localPath);
       let remoteData = await this.client.downloadFile(remote.fsId);
+      const remoteCipherMd5 = calculateMd5(remoteData);
 
       if (isEncrypted(remoteData) || settings.enableE2EE) {
         if (!settings.e2eePassword) {
@@ -569,7 +574,7 @@ export class SyncEngine {
           localMd5: local.md5 || "",
           remoteFsId: remote.fsId,
           remoteMtime: remote.mtime || Date.now(),
-          remoteMd5: remoteMd5,
+          remoteMd5: remote.md5 || remoteCipherMd5,
           lastSyncTime: Date.now(),
         });
       }

@@ -560,7 +560,7 @@ class ConfigImportModal extends Modal {
       }
 
       try {
-        applyBtn.setDisabled(true);
+        applyBtn.disabled = true;
         applyBtn.setText("解密中...");
         const config = await importEncryptedConfig(code, pin);
         await this.onImport(config);
@@ -568,7 +568,7 @@ class ConfigImportModal extends Modal {
       } catch (err: any) {
         new Notice(`导入失败: ${err.message || String(err)}`);
       } finally {
-        applyBtn.setDisabled(false);
+        applyBtn.disabled = false;
         applyBtn.setText("解密并应用配置");
       }
     };

@@ -27,7 +27,7 @@ __export(main_exports, {
   default: () => BaiduNetdiskSyncPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian4 = require("obsidian");
+var import_obsidian5 = require("obsidian");
 
 // src/api/baidu-client.ts
 var import_obsidian = require("obsidian");
@@ -600,7 +600,7 @@ async function deriveKey(password, salt, iterations = PBKDF2_ITERATIONS) {
   return c.subtle.deriveKey(
     {
       name: "PBKDF2",
-      salt,
+      salt: new Uint8Array(salt),
       iterations,
       hash: "SHA-256"
     },
@@ -732,10 +732,10 @@ async function importEncryptedConfig(pairingCode, pin) {
   }
   const base64Part = trimmed.slice(CONFIG_HEADER_PREFIX.length);
   const encryptedBytes = base64ToUint8Array(base64Part);
-  if (!isEncrypted(encryptedBytes.buffer)) {
+  if (!isEncrypted(new Uint8Array(encryptedBytes).buffer)) {
     throw new Error("\u914D\u5BF9\u7801\u683C\u5F0F\u65E0\u6548\uFF1A\u7F3A\u5C11\u5FC5\u8981\u7684\u52A0\u5BC6\u7B7E\u540D\u5934\uFF0C\u5DF2\u62D2\u7EDD\u5BFC\u5165\u672A\u53D7\u5BC6\u7801\u4FDD\u62A4\u7684\u660E\u6587\u914D\u5BF9\u7801\uFF01");
   }
-  const decryptedBuf = await decryptData(encryptedBytes.buffer, pin.trim());
+  const decryptedBuf = await decryptData(new Uint8Array(encryptedBytes).buffer, pin.trim());
   const dec = new TextDecoder();
   const jsonStr = dec.decode(decryptedBuf);
   try {
@@ -1127,7 +1127,7 @@ var ConfigImportModal = class extends import_obsidian2.Modal {
         return;
       }
       try {
-        applyBtn.setDisabled(true);
+        applyBtn.disabled = true;
         applyBtn.setText("\u89E3\u5BC6\u4E2D...");
         const config = await importEncryptedConfig(code, pin);
         await this.onImport(config);
@@ -1135,7 +1135,7 @@ var ConfigImportModal = class extends import_obsidian2.Modal {
       } catch (err) {
         new import_obsidian2.Notice(`\u5BFC\u5165\u5931\u8D25: ${err.message || String(err)}`);
       } finally {
-        applyBtn.setDisabled(false);
+        applyBtn.disabled = false;
         applyBtn.setText("\u89E3\u5BC6\u5E76\u5E94\u7528\u914D\u7F6E");
       }
     };
@@ -1185,7 +1185,7 @@ var SyncLogModal = class extends import_obsidian2.Modal {
 };
 
 // src/sync/engine.ts
-var import_obsidian3 = require("obsidian");
+var import_obsidian4 = require("obsidian");
 
 // src/utils/path.ts
 function normalizeVaultPath(p) {
@@ -1423,23 +1423,190 @@ var DebounceManager = class {
   }
 };
 
+// src/utils/atomic.ts
+var import_obsidian3 = require("obsidian");
+var _AtomicFileSystem = class _AtomicFileSystem {
+  constructor(app) {
+    this.app = app;
+    this.transactionDir = `${app.vault.configDir || ".obsidian"}/plugins/baidu-sync/transactions`;
+  }
+  exclusive(work) {
+    const previous = _AtomicFileSystem.locks.get(this.app) || Promise.resolve();
+    const next = previous.catch(() => void 0).then(work);
+    _AtomicFileSystem.locks.set(this.app, next.catch(() => void 0));
+    return next;
+  }
+  validateTarget(path) {
+    if (!path || path.startsWith("/") || path.includes("\\") || path.includes(":") || path.split("/").some((p) => !p || p === "." || p === "..") || path === this.transactionDir || path.startsWith(this.transactionDir + "/")) {
+      throw new Error(`Unsafe transaction target: ${path}`);
+    }
+  }
+  async hash(path) {
+    const adapter = this.app.vault.adapter;
+    return await adapter.exists(path) ? calculateMd5(await adapter.readBinary(path)) : null;
+  }
+  async verify(path, hash) {
+    if (await this.hash(path) !== hash) throw new Error(`File verification failed: ${path}`);
+  }
+  /** Desktop-only native API; never resolved on mobile. rename replaces an
+   * existing file in one filesystem operation instead of delete + rename. */
+  nativeIO() {
+    const adapter = this.app.vault.adapter;
+    if (!import_obsidian3.Platform.isDesktopApp || !(adapter instanceof import_obsidian3.FileSystemAdapter)) return null;
+    return { fs: require("fs/promises"), base: adapter.getBasePath() };
+  }
+  async flush(path) {
+    const native = this.nativeIO();
+    if (!native) return;
+    const handle = await native.fs.open(`${native.base}/${path}`, "r+");
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  }
+  async cleanup(record) {
+    const adapter = this.app.vault.adapter;
+    const stem = record.slice(0, -5);
+    for (const path of [stem + ".new", stem + ".old", record]) {
+      if (await adapter.exists(path)) await adapter.remove(path);
+    }
+  }
+  async recoverOne(record) {
+    const adapter = this.app.vault.adapter;
+    const j = JSON.parse(await adapter.read(record));
+    if (j.version !== 1 || typeof j.target !== "string" || !/^[a-f0-9]{32}$/.test(j.newHash) || !(j.oldHash === null || /^[a-f0-9]{32}$/.test(j.oldHash))) {
+      throw new Error(`Invalid transaction journal; manual recovery required: ${record}`);
+    }
+    this.validateTarget(j.target);
+    const current = await this.hash(j.target);
+    if (current === j.newHash || j.oldHash !== null && current === j.oldHash) {
+      await this.cleanup(record);
+      return false;
+    }
+    if (current !== null) {
+      throw new Error(`Target changed during transaction; preserved recovery files: ${j.target}`);
+    }
+    const stem = record.slice(0, -5);
+    const source = j.oldHash === null ? stem + ".new" : stem + ".old";
+    const expected = j.oldHash === null ? j.newHash : j.oldHash;
+    await this.verify(source, expected);
+    await this.ensureDirectoryExists(getParentDir(j.target));
+    await adapter.writeBinary(j.target, await adapter.readBinary(source));
+    await this.verify(j.target, expected);
+    await this.cleanup(record);
+    return true;
+  }
+  async recover() {
+    const adapter = this.app.vault.adapter;
+    let restored = 0, cleaned = 0;
+    if (!await adapter.exists(this.transactionDir)) return { restored, cleaned };
+    const list = await adapter.list(this.transactionDir);
+    for (const record of list.files.filter((p) => /\/[a-f0-9-]+\.json$/.test(p))) {
+      if (await this.recoverOne(record)) restored++;
+      cleaned++;
+    }
+    return { restored, cleaned };
+  }
+  async recoverCrashAndCleanStale() {
+    return this.exclusive(() => this.recover());
+  }
+  async atomicWrite(path, data, expectedMd5) {
+    return this.exclusive(async () => {
+      this.validateTarget(path);
+      await this.recover();
+      const adapter = this.app.vault.adapter;
+      const bytes = typeof data === "string" ? new TextEncoder().encode(data) : new Uint8Array(data instanceof Uint8Array ? data : new Uint8Array(data));
+      const newHash = calculateMd5(bytes);
+      if (expectedMd5 && expectedMd5.toLowerCase() !== newHash) throw new Error(`MD5 mismatch: ${path}`);
+      await this.ensureDirectoryExists(getParentDir(path));
+      await this.ensureDirectoryExists(this.transactionDir);
+      const id = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
+      const stem = `${this.transactionDir}/${id}`;
+      const record = stem + ".json";
+      await adapter.writeBinary(stem + ".new", bytes.buffer);
+      await this.verify(stem + ".new", newHash);
+      const oldHash = await this.hash(path);
+      if (oldHash !== null) {
+        await adapter.writeBinary(stem + ".old", await adapter.readBinary(path));
+        await this.verify(stem + ".old", oldHash);
+      }
+      const journal = { version: 1, target: path, oldHash, newHash };
+      const json = JSON.stringify(journal);
+      await adapter.write(record, json);
+      if (await adapter.read(record) !== json) throw new Error(`Journal verification failed: ${record}`);
+      await this.flush(stem + ".new");
+      if (oldHash !== null) await this.flush(stem + ".old");
+      await this.flush(record);
+      if (await this.hash(path) !== oldHash) throw new Error(`File changed before commit: ${path}`);
+      try {
+        const native = this.nativeIO();
+        if (native) {
+          await native.fs.rename(`${native.base}/${stem}.new`, `${native.base}/${path}`);
+        } else {
+          if (oldHash !== null) await adapter.remove(path);
+          await adapter.rename(stem + ".new", path);
+        }
+        await this.verify(path, newHash);
+      } catch (error) {
+        try {
+          await this.recoverOne(record);
+        } catch {
+        }
+        throw error;
+      }
+      try {
+        await this.cleanup(record);
+      } catch (error) {
+        console.warn("[BaiduSync] Committed; transaction cleanup deferred", error);
+      }
+    });
+  }
+  async ensureDirectoryExists(dir) {
+    if (!dir) return;
+    const adapter = this.app.vault.adapter;
+    let current = "";
+    for (const part of dir.split("/")) {
+      current = current ? `${current}/${part}` : part;
+      if (!await adapter.exists(current)) {
+        try {
+          await adapter.mkdir(current);
+        } catch (error) {
+          if (!await adapter.exists(current)) throw error;
+        }
+      }
+    }
+  }
+  async safeDelete(path) {
+    const adapter = this.app.vault.adapter;
+    if (!await adapter.exists(path)) return false;
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (file) await this.app.vault.trash(file, false);
+    else await adapter.trashLocal(path);
+    return true;
+  }
+  async readBinary(path) {
+    return this.app.vault.adapter.readBinary(path);
+  }
+};
+_AtomicFileSystem.locks = /* @__PURE__ */ new WeakMap();
+var AtomicFileSystem = _AtomicFileSystem;
+
 // src/sync/state.ts
-var DEFAULT_STATE_FILE_PATH = ".obsidian/plugins/baidu-sync/sync-state.json";
 var SyncStateStore = class {
-  constructor(app, stateFilePath = DEFAULT_STATE_FILE_PATH) {
+  constructor(app, stateFilePath = `${app.vault.configDir || ".obsidian"}/plugins/baidu-sync/sync-state.json`) {
     this.app = app;
     this.data = {
       version: 1,
       lastFullSyncTimestamp: 0,
       files: {}
     };
-    this.isLoaded = false;
     this.isDirty = false;
     this.saveLock = Promise.resolve();
     this.stateFilePath = stateFilePath;
   }
   /**
-   * Load existing state from disk. If missing or corrupted, initializes safely.
+   * Load existing state; a corrupt baseline blocks sync instead of being discarded.
    */
   async load() {
     const adapter = this.app.vault.adapter;
@@ -1447,23 +1614,19 @@ var SyncStateStore = class {
       if (await adapter.exists(this.stateFilePath)) {
         const content = await adapter.read(this.stateFilePath);
         const parsed = JSON.parse(content);
-        if (parsed && typeof parsed.files === "object") {
+        if (parsed && parsed.files && typeof parsed.files === "object" && !Array.isArray(parsed.files)) {
           this.data = {
             version: parsed.version || 1,
             lastFullSyncTimestamp: parsed.lastFullSyncTimestamp || 0,
             files: parsed.files || {}
           };
+        } else {
+          throw new Error("Invalid sync state");
         }
       }
     } catch (err) {
-      console.warn("Failed to parse existing sync-state.json, initializing new state:", err);
-      this.data = {
-        version: 1,
-        lastFullSyncTimestamp: 0,
-        files: {}
-      };
+      throw new Error(`\u540C\u6B65\u57FA\u7EBF\u52A0\u8F7D\u5931\u8D25\uFF0C\u5DF2\u505C\u6B62\u540C\u6B65\u4EE5\u4FDD\u62A4\u73B0\u6709\u6587\u4EF6: ${String(err)}`);
     }
-    this.isLoaded = true;
     this.isDirty = false;
   }
   /**
@@ -1514,212 +1677,13 @@ var SyncStateStore = class {
    */
   async save() {
     if (!this.isDirty) return;
-    this.saveLock = this.saveLock.then(async () => {
-      const adapter = this.app.vault.adapter;
-      const jsonContent = JSON.stringify(this.data, null, 2);
-      const lastSlash = this.stateFilePath.lastIndexOf("/");
-      const pluginDir = lastSlash > 0 ? this.stateFilePath.substring(0, lastSlash) : ".obsidian/plugins/baidu-sync";
-      if (!await adapter.exists(pluginDir)) {
-        await adapter.mkdir(pluginDir);
-      }
-      const tmpPath = `${this.stateFilePath}.tmp.${Date.now()}`;
-      try {
-        await adapter.write(tmpPath, jsonContent);
-        const verifyContent = await adapter.read(tmpPath);
-        JSON.parse(verifyContent);
-        if (await adapter.exists(this.stateFilePath)) {
-          await adapter.remove(this.stateFilePath);
-        }
-        await adapter.rename(tmpPath, this.stateFilePath);
-        this.isDirty = false;
-      } catch (err) {
-        try {
-          if (await adapter.exists(tmpPath)) {
-            await adapter.remove(tmpPath);
-          }
-        } catch (_) {
-        }
-        console.error("Failed to atomically save sync-state.json:", err);
-        throw err;
-      }
+    const task = this.saveLock.catch(() => void 0).then(async () => {
+      const json = JSON.stringify(this.data, null, 2);
+      await new AtomicFileSystem(this.app).atomicWrite(this.stateFilePath, json);
+      this.isDirty = JSON.stringify(this.data, null, 2) !== json;
     });
-    return this.saveLock;
-  }
-};
-
-// src/utils/atomic.ts
-var AtomicFileSystem = class {
-  constructor(app) {
-    this.app = app;
-  }
-  /**
-   * Atomically write an ArrayBuffer, Uint8Array or string to a local vault path.
-   * Employs Two-Phase Swap with Backup (.syncbak) & Rollback:
-   * 1. Write and verify temporary file (.synctmp)
-   * 2. Move existing target file to backup (.syncbak)
-   * 3. Rename temporary file to target file
-   * 4. On failure, automatically restore .syncbak
-   * 5. On success, clean up .syncbak
-   */
-  async atomicWrite(vaultPath, data, expectedMd5) {
-    const adapter = this.app.vault.adapter;
-    const parentDir = getParentDir(vaultPath);
-    if (parentDir && !await adapter.exists(parentDir)) {
-      await this.ensureDirectoryExists(parentDir);
-    }
-    const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data instanceof Uint8Array ? data : new Uint8Array(data);
-    const computedMd5 = calculateMd5(bytes);
-    if (expectedMd5 && computedMd5.toLowerCase() !== expectedMd5.toLowerCase()) {
-      throw new Error(
-        `MD5 \u6821\u9A8C\u5931\u8D25\uFF0C\u5DF2\u62D2\u7EDD\u5199\u5165 "${vaultPath}"\u3002\u9884\u671F: ${expectedMd5}, \u8BA1\u7B97\u503C: ${computedMd5}`
-      );
-    }
-    const tmpPath = `${vaultPath}.synctmp.${Date.now()}.${Math.random().toString(36).substring(2, 8)}`;
-    const bakPath = `${vaultPath}.syncbak`;
-    try {
-      if (typeof data === "string") {
-        await adapter.write(tmpPath, data);
-      } else {
-        const arrayBuf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-        await adapter.writeBinary(tmpPath, arrayBuf);
-      }
-      const tmpStat = await adapter.stat(tmpPath);
-      if (!tmpStat || tmpStat.size !== bytes.length) {
-        throw new Error(
-          `\u4E34\u65F6\u6587\u4EF6\u5927\u5C0F\u6821\u9A8C\u5931\u8D25 "${vaultPath}". \u9884\u671F: ${bytes.length}, \u5B9E\u9645: ${tmpStat?.size}`
-        );
-      }
-      const diskBuffer = await adapter.readBinary(tmpPath);
-      const diskMd5 = calculateMd5(diskBuffer);
-      if (diskMd5.toLowerCase() !== computedMd5.toLowerCase()) {
-        throw new Error(
-          `\u4E34\u65F6\u6587\u4EF6\u843D\u76D8 MD5 \u6821\u9A8C\u5931\u8D25 "${vaultPath}". \u5185\u5B58\u54C8\u5E0C: ${computedMd5}, \u78C1\u76D8\u91CD\u8BFB\u54C8\u5E0C: ${diskMd5}`
-        );
-      }
-      const targetExists = await adapter.exists(vaultPath);
-      if (targetExists) {
-        if (await adapter.exists(bakPath)) {
-          await adapter.remove(bakPath);
-        }
-        await adapter.rename(vaultPath, bakPath);
-      }
-      try {
-        await adapter.rename(tmpPath, vaultPath);
-        if (targetExists && await adapter.exists(bakPath)) {
-          await adapter.remove(bakPath);
-        }
-      } catch (commitErr) {
-        try {
-          if (targetExists && !await adapter.exists(vaultPath) && await adapter.exists(bakPath)) {
-            await adapter.rename(bakPath, vaultPath);
-            console.warn(`[BaiduSync] \u5199\u5165\u5931\u8D25\uFF0C\u5DF2\u6210\u529F\u4ECE\u5907\u4EFD\u56DE\u6EDA\u6062\u590D\u539F\u6587\u4EF6: ${vaultPath}`);
-          }
-        } catch (rollbackErr) {
-          console.error(`[BaiduSync] \u56DE\u6EDA\u5907\u4EFD\u5931\u8D25: ${vaultPath}`, rollbackErr);
-        }
-        throw commitErr;
-      }
-    } catch (err) {
-      try {
-        if (await adapter.exists(tmpPath)) {
-          await adapter.remove(tmpPath);
-        }
-      } catch (_) {
-      }
-      throw err;
-    }
-  }
-  /**
-   * Recursively ensure a directory exists in vault.
-   */
-  async ensureDirectoryExists(dirPath) {
-    const adapter = this.app.vault.adapter;
-    if (!dirPath || dirPath === "." || dirPath === "/") return;
-    const parts = dirPath.split("/").filter((p) => p.length > 0);
-    let current = "";
-    for (const part of parts) {
-      current = current ? `${current}/${part}` : part;
-      if (!await adapter.exists(current)) {
-        try {
-          await this.app.vault.createFolder(current);
-        } catch (e) {
-          if (!await adapter.exists(current)) {
-            throw e;
-          }
-        }
-      }
-    }
-  }
-  /**
-   * Safely delete a file or directory if it exists (using trash).
-   */
-  async safeDelete(vaultPath) {
-    const adapter = this.app.vault.adapter;
-    if (await adapter.exists(vaultPath)) {
-      const item = this.app.vault.getAbstractFileByPath(vaultPath);
-      if (item) {
-        await this.app.vault.trash(item, false);
-      } else {
-        await adapter.remove(vaultPath);
-      }
-      return true;
-    }
-    return false;
-  }
-  /**
-   * Read file as ArrayBuffer safely.
-   */
-  async readBinary(vaultPath) {
-    const adapter = this.app.vault.adapter;
-    return await adapter.readBinary(vaultPath);
-  }
-  /**
-   * Startup Crash Recovery & Cleanup:
-   * 1. If a .syncbak exists and the original file is missing, automatically RESTORE it!
-   * 2. If original file exists, remove stale .syncbak and .synctmp
-   */
-  async recoverCrashAndCleanStale(rootFolder = "") {
-    const adapter = this.app.vault.adapter;
-    let restored = 0;
-    let cleaned = 0;
-    try {
-      const list = await adapter.list(rootFolder);
-      for (const file of list.files) {
-        if (file.endsWith(".syncbak")) {
-          const originalPath = file.slice(0, -".syncbak".length);
-          const origExists = await adapter.exists(originalPath);
-          if (!origExists) {
-            try {
-              await adapter.rename(file, originalPath);
-              restored++;
-              console.log(`[BaiduSync] \u5D29\u6E83\u6062\u590D\uFF1A\u5DF2\u4ECE\u707E\u96BE\u5907\u4EFD\u6210\u529F\u8FD8\u539F "${originalPath}"`);
-            } catch (rErr) {
-              console.error(`[BaiduSync] \u8FD8\u539F\u5907\u4EFD\u5931\u8D25 "${file}":`, rErr);
-            }
-          } else {
-            try {
-              await adapter.remove(file);
-              cleaned++;
-            } catch (_) {
-            }
-          }
-        } else if (file.includes(".synctmp.")) {
-          try {
-            await adapter.remove(file);
-            cleaned++;
-          } catch (_) {
-          }
-        }
-      }
-      for (const folder of list.folders) {
-        const sub = await this.recoverCrashAndCleanStale(folder);
-        restored += sub.restored;
-        cleaned += sub.cleaned;
-      }
-    } catch (e) {
-      console.warn("[BaiduSync] \u5D29\u6E83\u626B\u63CF\u68C0\u67E5\u5931\u8D25:", e);
-    }
-    return { restored, cleaned };
+    this.saveLock = task;
+    return task;
   }
 };
 
@@ -1742,11 +1706,11 @@ var SyncEngine = class {
     this.client = client;
   }
   async initialize() {
-    await this.stateStore.load();
     const { restored, cleaned } = await this.atomicFs.recoverCrashAndCleanStale();
+    await this.stateStore.load();
     if (restored > 0) {
       this.log("warn", `\u5DF2\u81EA\u52A8\u6267\u884C\u5D29\u6E83\u6062\u590D\uFF1A\u6210\u529F\u4ECE\u707E\u96BE\u5907\u4EFD\u8FD8\u539F\u4E86 ${restored} \u4E2A\u7B14\u8BB0\u6587\u4EF6\uFF01`);
-      new import_obsidian3.Notice(`[BaiduSync] \u5D29\u6E83\u6062\u590D\uFF1A\u5DF2\u81EA\u52A8\u8FD8\u539F ${restored} \u4E2A\u7B14\u8BB0\u6587\u4EF6\uFF01`);
+      new import_obsidian4.Notice(`[BaiduSync] \u5D29\u6E83\u6062\u590D\uFF1A\u5DF2\u81EA\u52A8\u8FD8\u539F ${restored} \u4E2A\u7B14\u8BB0\u6587\u4EF6\uFF01`);
     }
     if (cleaned > 0) {
       this.log("info", `\u5DF2\u6E05\u7406 ${cleaned} \u4E2A\u5386\u53F2\u65E0\u7528\u4E34\u65F6/\u5907\u4EFD\u6587\u4EF6\u3002`);
@@ -1784,7 +1748,8 @@ var SyncEngine = class {
     const norm = normalizeVaultPath(vaultPath);
     if (!norm) return true;
     if (norm.startsWith(".trash/") || norm.startsWith(".git/")) return true;
-    if (norm.includes(".synctmp.")) return true;
+    const ownDir = `${this.app.vault.configDir || ".obsidian"}/plugins/baidu-sync`;
+    if (norm === ownDir || norm.startsWith(ownDir + "/")) return true;
     const settings = this.getSettings();
     if (norm.startsWith(".obsidian/")) {
       if (!settings.syncObsidianConfig) return true;
@@ -1805,7 +1770,7 @@ var SyncEngine = class {
    * Register local vault file modification with debounce for ordering
    */
   handleLocalFileModified(file) {
-    if (!(file instanceof import_obsidian3.TFile)) return;
+    if (!(file instanceof import_obsidian4.TFile)) return;
     if (this.shouldIgnore(file.path)) return;
     const debounceSeconds = this.getSettings().syncOnModifyDebounceSeconds || 3;
     this.debounceManager.debounce(file.path, debounceSeconds * 1e3, () => {
@@ -1861,7 +1826,7 @@ var SyncEngine = class {
       };
       const settings = this.getSettings();
       if (!settings.accessToken) {
-        new import_obsidian3.Notice("\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\uFF1A\u8BF7\u5148\u5728\u8BBE\u7F6E\u4E2D\u586B\u5199\u5E76\u6388\u6743 Access Token\uFF01");
+        new import_obsidian4.Notice("\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\uFF1A\u8BF7\u5148\u5728\u8BBE\u7F6E\u4E2D\u586B\u5199\u5E76\u6388\u6743 Access Token\uFF01");
         return result;
       }
       this.isSyncing = true;
@@ -1935,11 +1900,11 @@ var SyncEngine = class {
         await this.stateStore.save();
         this.setStatus("\u5DF2\u540C\u6B65", false);
         const summary = `\u540C\u6B65\u5B8C\u6210: \u2191${result.uploaded} \u2193${result.downloaded} \u26A0${result.conflicted} \u2715${result.deleted}${result.errors.length ? ` (\u5931\u8D25: ${result.errors.length})` : ""}`;
-        new import_obsidian3.Notice(summary);
+        new import_obsidian4.Notice(summary);
         this.log("info", summary);
       } catch (err) {
         this.log("error", "\u5168\u91CF\u540C\u6B65\u8FC7\u7A0B\u5F02\u5E38\u9000\u51FA", err.message || String(err));
-        new import_obsidian3.Notice(`\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u9519\u8BEF: ${err.message || String(err)}`);
+        new import_obsidian4.Notice(`\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u9519\u8BEF: ${err.message || String(err)}`);
         this.setStatus("\u540C\u6B65\u51FA\u9519", false);
       } finally {
         this.isSyncing = false;
@@ -2029,7 +1994,8 @@ var SyncEngine = class {
     if (decision.conflictSubtype === "remote_deleted_local_modified" || local.exists && !remote.exists) {
       let buffer = await this.atomicFs.readBinary(localPath);
       const localMd5 = local.md5 || calculateMd5(buffer);
-      if (settings.enableE2EE && settings.e2eePassword) {
+      if (settings.enableE2EE) {
+        if (!settings.e2eePassword?.trim()) throw new Error("\u5DF2\u542F\u7528\u52A0\u5BC6\u4F46\u7F3A\u5C11\u5BC6\u7801\uFF0C\u5DF2\u4E2D\u6B62\u4E0A\u4F20");
         buffer = await encryptData(buffer, settings.e2eePassword);
       }
       const uploadResult = await this.client.uploadFile(remotePath, buffer);
@@ -2043,7 +2009,7 @@ var SyncEngine = class {
         lastSyncTime: Date.now()
       });
       this.log("info", `\u51B2\u7A81\u6536\u655B\uFF1A\u7F51\u76D8\u7AEF\u66FE\u88AB\u5220\u9664\uFF0C\u4F46\u672C\u5730\u6709\u65B0\u4FEE\u6539\uFF0C\u5DF2\u81EA\u52A8\u4FDD\u7559\u5E76\u91CD\u65B0\u63A8\u9001\u5230\u7F51\u76D8: ${localPath}`);
-      new import_obsidian3.Notice(`\u51B2\u7A81\u5DF2\u6536\u655B\uFF1A\u672C\u5730\u65B0\u4FEE\u6539\u5DF2\u91CD\u65B0\u540C\u6B65\u81F3\u7F51\u76D8: ${localPath}`);
+      new import_obsidian4.Notice(`\u51B2\u7A81\u5DF2\u6536\u655B\uFF1A\u672C\u5730\u65B0\u4FEE\u6539\u5DF2\u91CD\u65B0\u540C\u6B65\u81F3\u7F51\u76D8: ${localPath}`);
       return;
     }
     if (decision.conflictSubtype === "local_deleted_remote_modified" || !local.exists && remote.exists) {
@@ -2070,13 +2036,14 @@ var SyncEngine = class {
         lastSyncTime: Date.now()
       });
       this.log("info", `\u51B2\u7A81\u6536\u655B\uFF1A\u672C\u5730\u66FE\u88AB\u5220\u9664\uFF0C\u4F46\u7F51\u76D8\u6709\u65B0\u4FEE\u6539\uFF0C\u5DF2\u81EA\u52A8\u4FDD\u7559\u5E76\u62C9\u53D6\u6700\u65B0\u5185\u5BB9: ${localPath}`);
-      new import_obsidian3.Notice(`\u51B2\u7A81\u5DF2\u6536\u655B\uFF1A\u5DF2\u62C9\u53D6\u7F51\u76D8\u6700\u65B0\u7248\u672C: ${localPath}`);
+      new import_obsidian4.Notice(`\u51B2\u7A81\u5DF2\u6536\u655B\uFF1A\u5DF2\u62C9\u53D6\u7F51\u76D8\u6700\u65B0\u7248\u672C: ${localPath}`);
       return;
     }
     if (strategy === "keep_local" && local.exists) {
       let buffer = await this.atomicFs.readBinary(localPath);
       const localMd5 = local.md5 || calculateMd5(buffer);
-      if (settings.enableE2EE && settings.e2eePassword) {
+      if (settings.enableE2EE) {
+        if (!settings.e2eePassword?.trim()) throw new Error("\u5DF2\u542F\u7528\u52A0\u5BC6\u4F46\u7F3A\u5C11\u5BC6\u7801\uFF0C\u5DF2\u4E2D\u6B62\u4E0A\u4F20");
         buffer = await encryptData(buffer, settings.e2eePassword);
       }
       const uploadResult = await this.client.uploadFile(remotePath, buffer);
@@ -2089,7 +2056,7 @@ var SyncEngine = class {
         remoteMd5: uploadResult.md5 || localMd5,
         lastSyncTime: Date.now()
       });
-      new import_obsidian3.Notice(`\u51B2\u7A81\u5DF2\u5904\u7406 (\u4FDD\u7559\u672C\u5730\u7248\u672C): ${localPath}`);
+      new import_obsidian4.Notice(`\u51B2\u7A81\u5DF2\u5904\u7406 (\u4FDD\u7559\u672C\u5730\u7248\u672C): ${localPath}`);
       return;
     }
     if (strategy === "keep_remote" && remote.exists && remote.fsId) {
@@ -2112,7 +2079,7 @@ var SyncEngine = class {
         remoteMd5: remote.md5 || downloadedMd5,
         lastSyncTime: Date.now()
       });
-      new import_obsidian3.Notice(`\u51B2\u7A81\u5DF2\u5904\u7406 (\u4FDD\u7559\u8FDC\u7AEF\u7248\u672C): ${localPath}`);
+      new import_obsidian4.Notice(`\u51B2\u7A81\u5DF2\u5904\u7406 (\u4FDD\u7559\u8FDC\u7AEF\u7248\u672C): ${localPath}`);
       return;
     }
     if (strategy === "keep_newer" && local.exists && remote.exists) {
@@ -2121,7 +2088,8 @@ var SyncEngine = class {
       if (localMtime >= remoteMtime) {
         let buffer = await this.atomicFs.readBinary(localPath);
         const localMd5 = local.md5 || calculateMd5(buffer);
-        if (settings.enableE2EE && settings.e2eePassword) {
+        if (settings.enableE2EE) {
+          if (!settings.e2eePassword?.trim()) throw new Error("\u5DF2\u542F\u7528\u52A0\u5BC6\u4F46\u7F3A\u5C11\u5BC6\u7801\uFF0C\u5DF2\u4E2D\u6B62\u4E0A\u4F20");
           buffer = await encryptData(buffer, settings.e2eePassword);
         }
         const uploadResult = await this.client.uploadFile(remotePath, buffer);
@@ -2134,7 +2102,7 @@ var SyncEngine = class {
           remoteMd5: uploadResult.md5 || localMd5,
           lastSyncTime: Date.now()
         });
-        new import_obsidian3.Notice(`\u51B2\u7A81\u5DF2\u5904\u7406 (\u4FDD\u7559\u8F83\u65B0\u672C\u5730\u7248\u672C): ${localPath}`);
+        new import_obsidian4.Notice(`\u51B2\u7A81\u5DF2\u5904\u7406 (\u4FDD\u7559\u8F83\u65B0\u672C\u5730\u7248\u672C): ${localPath}`);
         return;
       } else if (remote.fsId) {
         let data = await this.client.downloadFile(remote.fsId);
@@ -2155,13 +2123,14 @@ var SyncEngine = class {
           remoteMd5: remote.md5 || downloadedMd5,
           lastSyncTime: Date.now()
         });
-        new import_obsidian3.Notice(`\u51B2\u7A81\u5DF2\u5904\u7406 (\u4FDD\u7559\u8F83\u65B0\u8FDC\u7AEF\u7248\u672C): ${localPath}`);
+        new import_obsidian4.Notice(`\u51B2\u7A81\u5DF2\u5904\u7406 (\u4FDD\u7559\u8F83\u65B0\u8FDC\u7AEF\u7248\u672C): ${localPath}`);
         return;
       }
     }
     if (remote.exists && remote.fsId) {
       const conflictPath = generateConflictPath(localPath);
       let remoteData = await this.client.downloadFile(remote.fsId);
+      const remoteCipherMd5 = calculateMd5(remoteData);
       if (isEncrypted(remoteData) || settings.enableE2EE) {
         if (!settings.e2eePassword) {
           throw new Error(`\u65E0\u6CD5\u89E3\u5BC6\u8FDC\u7AEF\u51B2\u7A81\u526F\u672C: ${localPath}`);
@@ -2177,11 +2146,11 @@ var SyncEngine = class {
           localMd5: local.md5 || "",
           remoteFsId: remote.fsId,
           remoteMtime: remote.mtime || Date.now(),
-          remoteMd5,
+          remoteMd5: remote.md5 || remoteCipherMd5,
           lastSyncTime: Date.now()
         });
       }
-      new import_obsidian3.Notice(
+      new import_obsidian4.Notice(
         `\u68C0\u6D4B\u5230\u5E76\u53D1\u51B2\u7A81\uFF1A\u201C${localPath}\u201D\uFF01
 \u5DF2\u4FDD\u7559\u672C\u5730\u5185\u5BB9\uFF0C\u8FDC\u7AEF\u7248\u672C\u53E6\u5B58\u4E3A\uFF1A\u201C${conflictPath}\u201D`,
         8e3
@@ -2228,7 +2197,7 @@ var SyncEngine = class {
 };
 
 // src/main.ts
-var BaiduNetdiskSyncPlugin = class extends import_obsidian4.Plugin {
+var BaiduNetdiskSyncPlugin = class extends import_obsidian5.Plugin {
   constructor() {
     super(...arguments);
     this.settings = DEFAULT_SETTINGS;
@@ -2329,7 +2298,7 @@ var BaiduNetdiskSyncPlugin = class extends import_obsidian4.Plugin {
   }
   async runSync() {
     if (!this.settings.accessToken) {
-      new import_obsidian4.Notice("\u8BF7\u5148\u5728\u8BBE\u7F6E\u4E2D\u914D\u7F6E\u767E\u5EA6\u7F51\u76D8 Access Token\uFF01");
+      new import_obsidian5.Notice("\u8BF7\u5148\u5728\u8BBE\u7F6E\u4E2D\u914D\u7F6E\u767E\u5EA6\u7F51\u76D8 Access Token\uFF01");
       return;
     }
     await this.syncEngine.runFullSync();

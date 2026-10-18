@@ -1,10 +1,10 @@
 {
   "id": "baidu-sync",
-  "name": "Baidu Netdisk Sync",
-  "version": "1.0.1",
-  "minAppVersion": "0.15.0",
-  "description": "High-reliability bidirectional sync with Baidu Netdisk (百度网盘) featuring strict ordering, atomicity, 3-way conflict-safe replication, and optional E2EE.",
+  "name": "Baidu Sync Safe",
+  "version": "1.0.2",
+  "minAppVersion": "1.14.4",
+  "description": "Sync files with Baidu Netdisk using conflict copies, optional end-to-end encryption, and recoverable desktop file replacement.",
   "author": "minLaoGe",
   "authorUrl": "https://github.com/minLaoGe/obsidian-baidu-netdisk-sync",
-  "isDesktopOnly": false
+  "isDesktopOnly": true
 }

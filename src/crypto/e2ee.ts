@@ -54,7 +54,7 @@ export async function deriveKey(
   return c.subtle.deriveKey(
     {
       name: "PBKDF2",
-      salt: salt,
+      salt: new Uint8Array(salt),
       iterations: iterations,
       hash: "SHA-256",
     },
