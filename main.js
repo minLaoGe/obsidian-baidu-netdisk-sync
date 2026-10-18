@@ -1290,9 +1290,9 @@ var DebounceManager = class {
 };
 
 // src/sync/state.ts
-var STATE_FILE_PATH = ".obsidian/plugins/obsidian-baidu-netdisk-sync/sync-state.json";
+var DEFAULT_STATE_FILE_PATH = ".obsidian/plugins/baidu-sync/sync-state.json";
 var SyncStateStore = class {
-  constructor(app) {
+  constructor(app, stateFilePath = DEFAULT_STATE_FILE_PATH) {
     this.app = app;
     this.data = {
       version: 1,
@@ -1302,6 +1302,7 @@ var SyncStateStore = class {
     this.isLoaded = false;
     this.isDirty = false;
     this.saveLock = Promise.resolve();
+    this.stateFilePath = stateFilePath;
   }
   /**
    * Load existing state from disk. If missing or corrupted, initializes safely.
@@ -1309,8 +1310,8 @@ var SyncStateStore = class {
   async load() {
     const adapter = this.app.vault.adapter;
     try {
-      if (await adapter.exists(STATE_FILE_PATH)) {
-        const content = await adapter.read(STATE_FILE_PATH);
+      if (await adapter.exists(this.stateFilePath)) {
+        const content = await adapter.read(this.stateFilePath);
         const parsed = JSON.parse(content);
         if (parsed && typeof parsed.files === "object") {
           this.data = {
@@ -1382,19 +1383,20 @@ var SyncStateStore = class {
     this.saveLock = this.saveLock.then(async () => {
       const adapter = this.app.vault.adapter;
       const jsonContent = JSON.stringify(this.data, null, 2);
-      const pluginDir = ".obsidian/plugins/obsidian-baidu-netdisk-sync";
+      const lastSlash = this.stateFilePath.lastIndexOf("/");
+      const pluginDir = lastSlash > 0 ? this.stateFilePath.substring(0, lastSlash) : ".obsidian/plugins/baidu-sync";
       if (!await adapter.exists(pluginDir)) {
         await adapter.mkdir(pluginDir);
       }
-      const tmpPath = `${STATE_FILE_PATH}.tmp.${Date.now()}`;
+      const tmpPath = `${this.stateFilePath}.tmp.${Date.now()}`;
       try {
         await adapter.write(tmpPath, jsonContent);
         const verifyContent = await adapter.read(tmpPath);
         JSON.parse(verifyContent);
-        if (await adapter.exists(STATE_FILE_PATH)) {
-          await adapter.remove(STATE_FILE_PATH);
+        if (await adapter.exists(this.stateFilePath)) {
+          await adapter.remove(this.stateFilePath);
         }
-        await adapter.rename(tmpPath, STATE_FILE_PATH);
+        await adapter.rename(tmpPath, this.stateFilePath);
         this.isDirty = false;
       } catch (err) {
         try {

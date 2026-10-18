@@ -1,7 +1,7 @@
 import { App } from "obsidian";
 import { SyncMetadataEntry, SyncStateData } from "../types";
 
-const STATE_FILE_PATH = ".obsidian/plugins/obsidian-baidu-netdisk-sync/sync-state.json";
+const DEFAULT_STATE_FILE_PATH = ".obsidian/plugins/baidu-sync/sync-state.json";
 
 /**
  * Manages the persistent synchronization state database with atomic write semantics.
@@ -15,8 +15,11 @@ export class SyncStateStore {
   private isLoaded: boolean = false;
   private isDirty: boolean = false;
   private saveLock: Promise<void> = Promise.resolve();
+  private stateFilePath: string;
 
-  constructor(private app: App) {}
+  constructor(private app: App, stateFilePath: string = DEFAULT_STATE_FILE_PATH) {
+    this.stateFilePath = stateFilePath;
+  }
 
   /**
    * Load existing state from disk. If missing or corrupted, initializes safely.
@@ -24,8 +27,8 @@ export class SyncStateStore {
   async load(): Promise<void> {
     const adapter = this.app.vault.adapter;
     try {
-      if (await adapter.exists(STATE_FILE_PATH)) {
-        const content = await adapter.read(STATE_FILE_PATH);
+      if (await adapter.exists(this.stateFilePath)) {
+        const content = await adapter.read(this.stateFilePath);
         const parsed = JSON.parse(content);
         if (parsed && typeof parsed.files === "object") {
           this.data = {
@@ -112,12 +115,13 @@ export class SyncStateStore {
       const jsonContent = JSON.stringify(this.data, null, 2);
       
       // Ensure plugin folder exists
-      const pluginDir = ".obsidian/plugins/obsidian-baidu-netdisk-sync";
+      const lastSlash = this.stateFilePath.lastIndexOf("/");
+      const pluginDir = lastSlash > 0 ? this.stateFilePath.substring(0, lastSlash) : ".obsidian/plugins/baidu-sync";
       if (!(await adapter.exists(pluginDir))) {
         await adapter.mkdir(pluginDir);
       }
 
-      const tmpPath = `${STATE_FILE_PATH}.tmp.${Date.now()}`;
+      const tmpPath = `${this.stateFilePath}.tmp.${Date.now()}`;
       try {
         await adapter.write(tmpPath, jsonContent);
         
@@ -126,10 +130,10 @@ export class SyncStateStore {
         JSON.parse(verifyContent);
 
         // Atomic replace
-        if (await adapter.exists(STATE_FILE_PATH)) {
-          await adapter.remove(STATE_FILE_PATH);
+        if (await adapter.exists(this.stateFilePath)) {
+          await adapter.remove(this.stateFilePath);
         }
-        await adapter.rename(tmpPath, STATE_FILE_PATH);
+        await adapter.rename(tmpPath, this.stateFilePath);
         this.isDirty = false;
       } catch (err) {
         try {
