@@ -13,6 +13,7 @@ export interface ConflictDecision {
   action: SyncActionType;
   reason: string;
   isConflict: boolean;
+  conflictSubtype?: "both_modified" | "remote_deleted_local_modified" | "local_deleted_remote_modified";
 }
 
 /**
@@ -67,14 +68,34 @@ export function determineSyncAction(
       // True conflict: both modified with different contents
       return {
         action: "conflict",
+        conflictSubtype: "both_modified",
         reason: "Both sides modified independently with differing hashes",
         isConflict: true,
       };
     }
 
-    // One deleted while the other modified -> Conflict
+    // 1.8 One deleted while the other modified -> Conflict
+    if (local.exists && !remote.exists) {
+      return {
+        action: "conflict",
+        conflictSubtype: "remote_deleted_local_modified",
+        reason: "远端已删除但本地有新修改，存在修改与删除冲突",
+        isConflict: true,
+      };
+    }
+
+    if (!local.exists && remote.exists) {
+      return {
+        action: "conflict",
+        conflictSubtype: "local_deleted_remote_modified",
+        reason: "本地已删除但远端有新修改，存在修改与删除冲突",
+        isConflict: true,
+      };
+    }
+
     return {
       action: "conflict",
+      conflictSubtype: "both_modified",
       reason: "One side deleted while the other side was modified",
       isConflict: true,
     };

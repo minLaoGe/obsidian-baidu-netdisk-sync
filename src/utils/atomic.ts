@@ -59,11 +59,19 @@ export class AtomicFileSystem {
         await adapter.writeBinary(tmpPath, arrayBuf);
       }
 
-      // Verify temp file on disk
+      // Verify temp file on disk: check size AND re-read binary to verify hash integrity
       const tmpStat = await adapter.stat(tmpPath);
       if (!tmpStat || tmpStat.size !== bytes.length) {
         throw new Error(
           `临时文件大小校验失败 "${vaultPath}". 预期: ${bytes.length}, 实际: ${tmpStat?.size}`
+        );
+      }
+
+      const diskBuffer = await adapter.readBinary(tmpPath);
+      const diskMd5 = calculateMd5(diskBuffer);
+      if (diskMd5.toLowerCase() !== computedMd5.toLowerCase()) {
+        throw new Error(
+          `临时文件落盘 MD5 校验失败 "${vaultPath}". 内存哈希: ${computedMd5}, 磁盘重读哈希: ${diskMd5}`
         );
       }
 

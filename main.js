@@ -732,6 +732,9 @@ async function importEncryptedConfig(pairingCode, pin) {
   }
   const base64Part = trimmed.slice(CONFIG_HEADER_PREFIX.length);
   const encryptedBytes = base64ToUint8Array(base64Part);
+  if (!isEncrypted(encryptedBytes.buffer)) {
+    throw new Error("\u914D\u5BF9\u7801\u683C\u5F0F\u65E0\u6548\uFF1A\u7F3A\u5C11\u5FC5\u8981\u7684\u52A0\u5BC6\u7B7E\u540D\u5934\uFF0C\u5DF2\u62D2\u7EDD\u5BFC\u5165\u672A\u53D7\u5BC6\u7801\u4FDD\u62A4\u7684\u660E\u6587\u914D\u5BF9\u7801\uFF01");
+  }
   const decryptedBuf = await decryptData(encryptedBytes.buffer, pin.trim());
   const dec = new TextDecoder();
   const jsonStr = dec.decode(decryptedBuf);
@@ -1250,12 +1253,30 @@ function determineSyncAction(local, remote, base) {
       }
       return {
         action: "conflict",
+        conflictSubtype: "both_modified",
         reason: "Both sides modified independently with differing hashes",
+        isConflict: true
+      };
+    }
+    if (local.exists && !remote.exists) {
+      return {
+        action: "conflict",
+        conflictSubtype: "remote_deleted_local_modified",
+        reason: "\u8FDC\u7AEF\u5DF2\u5220\u9664\u4F46\u672C\u5730\u6709\u65B0\u4FEE\u6539\uFF0C\u5B58\u5728\u4FEE\u6539\u4E0E\u5220\u9664\u51B2\u7A81",
+        isConflict: true
+      };
+    }
+    if (!local.exists && remote.exists) {
+      return {
+        action: "conflict",
+        conflictSubtype: "local_deleted_remote_modified",
+        reason: "\u672C\u5730\u5DF2\u5220\u9664\u4F46\u8FDC\u7AEF\u6709\u65B0\u4FEE\u6539\uFF0C\u5B58\u5728\u4FEE\u6539\u4E0E\u5220\u9664\u51B2\u7A81",
         isConflict: true
       };
     }
     return {
       action: "conflict",
+      conflictSubtype: "both_modified",
       reason: "One side deleted while the other side was modified",
       isConflict: true
     };
@@ -1566,6 +1587,13 @@ var AtomicFileSystem = class {
       if (!tmpStat || tmpStat.size !== bytes.length) {
         throw new Error(
           `\u4E34\u65F6\u6587\u4EF6\u5927\u5C0F\u6821\u9A8C\u5931\u8D25 "${vaultPath}". \u9884\u671F: ${bytes.length}, \u5B9E\u9645: ${tmpStat?.size}`
+        );
+      }
+      const diskBuffer = await adapter.readBinary(tmpPath);
+      const diskMd5 = calculateMd5(diskBuffer);
+      if (diskMd5.toLowerCase() !== computedMd5.toLowerCase()) {
+        throw new Error(
+          `\u4E34\u65F6\u6587\u4EF6\u843D\u76D8 MD5 \u6821\u9A8C\u5931\u8D25 "${vaultPath}". \u5185\u5B58\u54C8\u5E0C: ${computedMd5}, \u78C1\u76D8\u91CD\u8BFB\u54C8\u5E0C: ${diskMd5}`
         );
       }
       const targetExists = await adapter.exists(vaultPath);
@@ -1974,7 +2002,7 @@ var SyncEngine = class {
         break;
       }
       case "conflict": {
-        await this.resolveConflict(localPath, remotePath, local, remote, base);
+        await this.resolveConflict(localPath, remotePath, decision, local, remote, base);
         break;
       }
       case "delete_remote": {
@@ -1990,11 +2018,61 @@ var SyncEngine = class {
     }
   }
   /**
-   * Conflict handler respecting configured conflict strategy
+   * Robust conflict resolver with guaranteed convergence across all conflict scenarios:
+   * 1. Both modified -> Safe branch conflict file + update base snapshot to converge
+   * 2. Remote deleted, local modified -> Keep local & re-upload to converge
+   * 3. Local deleted, remote modified -> Keep remote & re-download to converge
    */
-  async resolveConflict(localPath, remotePath, local, remote, base) {
+  async resolveConflict(localPath, remotePath, decision, local, remote, base) {
     const settings = this.getSettings();
     const strategy = settings.conflictStrategy || "create_conflict_file";
+    if (decision.conflictSubtype === "remote_deleted_local_modified" || local.exists && !remote.exists) {
+      let buffer = await this.atomicFs.readBinary(localPath);
+      const localMd5 = local.md5 || calculateMd5(buffer);
+      if (settings.enableE2EE && settings.e2eePassword) {
+        buffer = await encryptData(buffer, settings.e2eePassword);
+      }
+      const uploadResult = await this.client.uploadFile(remotePath, buffer);
+      this.stateStore.set(localPath, {
+        path: localPath,
+        localMtime: local.mtime || Date.now(),
+        localMd5,
+        remoteFsId: uploadResult.fsId,
+        remoteMtime: Date.now(),
+        remoteMd5: uploadResult.md5 || localMd5,
+        lastSyncTime: Date.now()
+      });
+      this.log("info", `\u51B2\u7A81\u6536\u655B\uFF1A\u7F51\u76D8\u7AEF\u66FE\u88AB\u5220\u9664\uFF0C\u4F46\u672C\u5730\u6709\u65B0\u4FEE\u6539\uFF0C\u5DF2\u81EA\u52A8\u4FDD\u7559\u5E76\u91CD\u65B0\u63A8\u9001\u5230\u7F51\u76D8: ${localPath}`);
+      new import_obsidian3.Notice(`\u51B2\u7A81\u5DF2\u6536\u655B\uFF1A\u672C\u5730\u65B0\u4FEE\u6539\u5DF2\u91CD\u65B0\u540C\u6B65\u81F3\u7F51\u76D8: ${localPath}`);
+      return;
+    }
+    if (decision.conflictSubtype === "local_deleted_remote_modified" || !local.exists && remote.exists) {
+      if (!remote.fsId) {
+        throw new Error(`\u65E0\u6CD5\u62C9\u53D6\u8FDC\u7AEF\u66F4\u65B0: \u7F3A\u5C11 fs_id: ${localPath}`);
+      }
+      let data = await this.client.downloadFile(remote.fsId);
+      if (isEncrypted(data) || settings.enableE2EE) {
+        if (!settings.e2eePassword) {
+          throw new Error(`\u65E0\u6CD5\u89E3\u5BC6\u8FDC\u7AEF\u66F4\u65B0: ${localPath}`);
+        }
+        data = await decryptData(data, settings.e2eePassword);
+      }
+      const downloadedMd5 = calculateMd5(data);
+      await this.atomicFs.atomicWrite(localPath, data, downloadedMd5);
+      const newStat = await this.app.vault.adapter.stat(localPath);
+      this.stateStore.set(localPath, {
+        path: localPath,
+        localMtime: newStat ? newStat.mtime : Date.now(),
+        localMd5: downloadedMd5,
+        remoteFsId: remote.fsId,
+        remoteMtime: remote.mtime || Date.now(),
+        remoteMd5: remote.md5 || downloadedMd5,
+        lastSyncTime: Date.now()
+      });
+      this.log("info", `\u51B2\u7A81\u6536\u655B\uFF1A\u672C\u5730\u66FE\u88AB\u5220\u9664\uFF0C\u4F46\u7F51\u76D8\u6709\u65B0\u4FEE\u6539\uFF0C\u5DF2\u81EA\u52A8\u4FDD\u7559\u5E76\u62C9\u53D6\u6700\u65B0\u5185\u5BB9: ${localPath}`);
+      new import_obsidian3.Notice(`\u51B2\u7A81\u5DF2\u6536\u655B\uFF1A\u5DF2\u62C9\u53D6\u7F51\u76D8\u6700\u65B0\u7248\u672C: ${localPath}`);
+      return;
+    }
     if (strategy === "keep_local" && local.exists) {
       let buffer = await this.atomicFs.readBinary(localPath);
       const localMd5 = local.md5 || calculateMd5(buffer);
@@ -2090,7 +2168,8 @@ var SyncEngine = class {
         }
         remoteData = await decryptData(remoteData, settings.e2eePassword);
       }
-      await this.atomicFs.atomicWrite(conflictPath, remoteData);
+      const remoteMd5 = calculateMd5(remoteData);
+      await this.atomicFs.atomicWrite(conflictPath, remoteData, remoteMd5);
       if (local.exists) {
         this.stateStore.set(localPath, {
           path: localPath,
@@ -2098,15 +2177,16 @@ var SyncEngine = class {
           localMd5: local.md5 || "",
           remoteFsId: remote.fsId,
           remoteMtime: remote.mtime || Date.now(),
-          remoteMd5: remote.md5 || "",
+          remoteMd5,
           lastSyncTime: Date.now()
         });
       }
       new import_obsidian3.Notice(
-        `\u68C0\u6D4B\u5230\u51B2\u7A81\uFF1A\u201C${localPath}\u201D\uFF01
+        `\u68C0\u6D4B\u5230\u5E76\u53D1\u51B2\u7A81\uFF1A\u201C${localPath}\u201D\uFF01
 \u5DF2\u4FDD\u7559\u672C\u5730\u5185\u5BB9\uFF0C\u8FDC\u7AEF\u7248\u672C\u53E6\u5B58\u4E3A\uFF1A\u201C${conflictPath}\u201D`,
         8e3
       );
+      this.log("warn", `\u5E76\u53D1\u51B2\u7A81\u5DF2\u6536\u655B\uFF1A\u5DF2\u751F\u6210\u526F\u672C "${conflictPath}" \u5E76\u66F4\u65B0\u57FA\u7EBF\u5FEB\u7167`);
     }
   }
   async inspectLocalFile(vaultPath, cachedFile) {
@@ -2125,21 +2205,23 @@ var SyncEngine = class {
       md5
     };
   }
+  /**
+   * Inspect remote file state.
+   * Note: If network error occurs, we DO NOT swallow it and return exists: false.
+   * We let it throw to abort single file sync safely, preventing accidental deletion of local files!
+   */
   async inspectRemoteFile(remotePath) {
-    try {
-      const parentDir = remotePath.substring(0, remotePath.lastIndexOf("/"));
-      const list = await this.client.listFiles(parentDir, false);
-      const matched = list.find((item) => item.path === remotePath);
-      if (matched && matched.isdir === 0) {
-        return {
-          exists: true,
-          mtime: matched.serverMtime,
-          size: matched.size,
-          md5: matched.md5,
-          fsId: matched.fsId
-        };
-      }
-    } catch (e) {
+    const parentDir = remotePath.substring(0, remotePath.lastIndexOf("/"));
+    const list = await this.client.listFiles(parentDir, false);
+    const matched = list.find((item) => item.path === remotePath);
+    if (matched && matched.isdir === 0) {
+      return {
+        exists: true,
+        mtime: matched.serverMtime,
+        size: matched.size,
+        md5: matched.md5,
+        fsId: matched.fsId
+      };
     }
     return { exists: false };
   }

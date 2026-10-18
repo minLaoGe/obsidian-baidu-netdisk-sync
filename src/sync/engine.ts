@@ -369,7 +369,7 @@ export class SyncEngine {
       }
 
       case "conflict": {
-        await this.resolveConflict(localPath, remotePath, local, remote, base);
+        await this.resolveConflict(localPath, remotePath, decision, local, remote, base);
         break;
       }
 
@@ -388,11 +388,15 @@ export class SyncEngine {
   }
 
   /**
-   * Conflict handler respecting configured conflict strategy
+   * Robust conflict resolver with guaranteed convergence across all conflict scenarios:
+   * 1. Both modified -> Safe branch conflict file + update base snapshot to converge
+   * 2. Remote deleted, local modified -> Keep local & re-upload to converge
+   * 3. Local deleted, remote modified -> Keep remote & re-download to converge
    */
   private async resolveConflict(
     localPath: string,
     remotePath: string,
+    decision: ConflictDecision,
     local: FileStateInspection,
     remote: FileStateInspection,
     base?: any
@@ -400,6 +404,58 @@ export class SyncEngine {
     const settings = this.getSettings();
     const strategy = settings.conflictStrategy || "create_conflict_file";
 
+    // Scenario A: Remote was deleted, but local was modified (Local Wins to prevent data loss)
+    if (decision.conflictSubtype === "remote_deleted_local_modified" || (local.exists && !remote.exists)) {
+      let buffer = await this.atomicFs.readBinary(localPath);
+      const localMd5 = local.md5 || calculateMd5(buffer);
+      if (settings.enableE2EE && settings.e2eePassword) {
+        buffer = await encryptData(buffer, settings.e2eePassword);
+      }
+      const uploadResult = await this.client.uploadFile(remotePath, buffer);
+      this.stateStore.set(localPath, {
+        path: localPath,
+        localMtime: local.mtime || Date.now(),
+        localMd5: localMd5,
+        remoteFsId: uploadResult.fsId,
+        remoteMtime: Date.now(),
+        remoteMd5: uploadResult.md5 || localMd5,
+        lastSyncTime: Date.now(),
+      });
+      this.log("info", `冲突收敛：网盘端曾被删除，但本地有新修改，已自动保留并重新推送到网盘: ${localPath}`);
+      new Notice(`冲突已收敛：本地新修改已重新同步至网盘: ${localPath}`);
+      return;
+    }
+
+    // Scenario B: Local was deleted, but remote was modified (Remote Wins to prevent data loss)
+    if (decision.conflictSubtype === "local_deleted_remote_modified" || (!local.exists && remote.exists)) {
+      if (!remote.fsId) {
+        throw new Error(`无法拉取远端更新: 缺少 fs_id: ${localPath}`);
+      }
+      let data = await this.client.downloadFile(remote.fsId);
+      if (isEncrypted(data) || settings.enableE2EE) {
+        if (!settings.e2eePassword) {
+          throw new Error(`无法解密远端更新: ${localPath}`);
+        }
+        data = await decryptData(data, settings.e2eePassword);
+      }
+      const downloadedMd5 = calculateMd5(data);
+      await this.atomicFs.atomicWrite(localPath, data, downloadedMd5);
+      const newStat = await this.app.vault.adapter.stat(localPath);
+      this.stateStore.set(localPath, {
+        path: localPath,
+        localMtime: newStat ? newStat.mtime : Date.now(),
+        localMd5: downloadedMd5,
+        remoteFsId: remote.fsId,
+        remoteMtime: remote.mtime || Date.now(),
+        remoteMd5: remote.md5 || downloadedMd5,
+        lastSyncTime: Date.now(),
+      });
+      this.log("info", `冲突收敛：本地曾被删除，但网盘有新修改，已自动保留并拉取最新内容: ${localPath}`);
+      new Notice(`冲突已收敛：已拉取网盘最新版本: ${localPath}`);
+      return;
+    }
+
+    // Scenario C: Both exist and were modified concurrently (True Conflict)
     if (strategy === "keep_local" && local.exists) {
       let buffer = await this.atomicFs.readBinary(localPath);
       const localMd5 = local.md5 || calculateMd5(buffer);
@@ -489,7 +545,7 @@ export class SyncEngine {
       }
     }
 
-    // Default safe strategy: create_conflict_file (Zero Data Loss)
+    // Default safe strategy: create_conflict_file (Zero Data Loss + Guaranteed Convergence)
     if (remote.exists && remote.fsId) {
       const conflictPath = generateConflictPath(localPath);
       let remoteData = await this.client.downloadFile(remote.fsId);
@@ -501,8 +557,11 @@ export class SyncEngine {
         remoteData = await decryptData(remoteData, settings.e2eePassword);
       }
 
-      await this.atomicFs.atomicWrite(conflictPath, remoteData);
+      const remoteMd5 = calculateMd5(remoteData);
+      await this.atomicFs.atomicWrite(conflictPath, remoteData, remoteMd5);
 
+      // Crucial convergence step: update base snapshot to current local file
+      // so subsequent sync cycles do not continuously loop on conflict!
       if (local.exists) {
         this.stateStore.set(localPath, {
           path: localPath,
@@ -510,15 +569,16 @@ export class SyncEngine {
           localMd5: local.md5 || "",
           remoteFsId: remote.fsId,
           remoteMtime: remote.mtime || Date.now(),
-          remoteMd5: remote.md5 || "",
+          remoteMd5: remoteMd5,
           lastSyncTime: Date.now(),
         });
       }
 
       new Notice(
-        `检测到冲突：“${localPath}”！\n已保留本地内容，远端版本另存为：“${conflictPath}”`,
+        `检测到并发冲突：“${localPath}”！\n已保留本地内容，远端版本另存为：“${conflictPath}”`,
         8000
       );
+      this.log("warn", `并发冲突已收敛：已生成副本 "${conflictPath}" 并更新基线快照`);
     }
   }
 
@@ -541,23 +601,25 @@ export class SyncEngine {
     };
   }
 
+  /**
+   * Inspect remote file state.
+   * Note: If network error occurs, we DO NOT swallow it and return exists: false.
+   * We let it throw to abort single file sync safely, preventing accidental deletion of local files!
+   */
   private async inspectRemoteFile(remotePath: string): Promise<FileStateInspection> {
-    try {
-      const parentDir = remotePath.substring(0, remotePath.lastIndexOf("/"));
-      const list = await this.client.listFiles(parentDir, false);
-      const matched = list.find((item) => item.path === remotePath);
+    const parentDir = remotePath.substring(0, remotePath.lastIndexOf("/"));
+    // listFiles will return [] if parentDir doesn't exist (errno -9), or throw on network/auth error
+    const list = await this.client.listFiles(parentDir, false);
+    const matched = list.find((item) => item.path === remotePath);
 
-      if (matched && matched.isdir === 0) {
-        return {
-          exists: true,
-          mtime: matched.serverMtime,
-          size: matched.size,
-          md5: matched.md5,
-          fsId: matched.fsId,
-        };
-      }
-    } catch (e) {
-      // Ignore
+    if (matched && matched.isdir === 0) {
+      return {
+        exists: true,
+        mtime: matched.serverMtime,
+        size: matched.size,
+        md5: matched.md5,
+        fsId: matched.fsId,
+      };
     }
     return { exists: false };
   }

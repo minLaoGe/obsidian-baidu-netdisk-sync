@@ -1,4 +1,4 @@
-import { encryptData, decryptData } from "./e2ee";
+import { encryptData, decryptData, isEncrypted } from "./e2ee";
 import { PluginSettings } from "../types";
 
 export interface SharedSyncConfig {
@@ -93,6 +93,11 @@ export async function importEncryptedConfig(
 
   const base64Part = trimmed.slice(CONFIG_HEADER_PREFIX.length);
   const encryptedBytes = base64ToUint8Array(base64Part);
+
+  // Mandatory check: Must have valid E2EE magic header to prevent password bypass
+  if (!isEncrypted(encryptedBytes.buffer)) {
+    throw new Error("配对码格式无效：缺少必要的加密签名头，已拒绝导入未受密码保护的明文配对码！");
+  }
 
   const decryptedBuf = await decryptData(encryptedBytes.buffer, pin.trim());
   const dec = new TextDecoder();
