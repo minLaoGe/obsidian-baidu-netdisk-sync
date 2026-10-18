@@ -1,6 +1,23 @@
 # Baidu Sync Safe — Obsidian 百度网盘同步
 
-为 Obsidian 桌面版打造的百度网盘双向同步插件。当前 1.0.2 仅支持桌面端，最低 Obsidian 版本为 1.14.4；移动端尚未实机验证，暂不发布移动端支持。依托百度网盘大容量云存储，提供**单设备串行执行**、**单文件替换与事务恢复**、**3-Way 冲突副本保护**，并支持**端到端零知识加密 (E2EE)** 与**多设备一键跨端快速配对**机制。
+## English
+
+Baidu Sync Safe synchronizes an Obsidian desktop vault with Baidu Netdisk. It supports manual and scheduled bidirectional sync, conflict copies, optional AES-256-GCM end-to-end encryption, and encrypted configuration transfer between desktop devices.
+
+**Requirements:** Obsidian 1.14.4 or later on desktop, a Baidu Netdisk account, and a personal Baidu developer application with AppKey/AppSecret. Mobile support is not released.
+
+**Install:** Download `main.js`, `manifest.json`, and `styles.css` from this repository's [latest release](https://github.com/minLaoGe/obsidian-baidu-netdisk-sync/releases/latest). Place them in `<vault>/.obsidian/plugins/baidu-sync/` and enable **Baidu Sync Safe** under Community plugins. For a custom configuration folder, replace `.obsidian` with your configuration folder.
+
+**Set up:** Create an application in the Baidu Netdisk developer console, enter its AppKey and AppSecret in plugin settings, open the authorization page, exchange the authorization code for a token, and test connectivity. Choose a remote directory before starting sync. To enable encryption, set a nonempty encryption password on every device. Keep an independent backup before the first sync.
+
+**File safety:** Desktop replacement uses native filesystem rename with verified backup and journal files and pre-commit fsync. Startup recovery only processes plugin-owned journal entries. This is single-file replacement and recovery, not a distributed transaction across the vault and Baidu Netdisk or a guarantee against arbitrary physical power loss. The plugin makes requests to Baidu for authorization, uploads and downloads and uses the clipboard for user-triggered configuration transfer.
+
+**Credits:** The link to owl234's project in the Chinese acknowledgements below is intentional attribution for encryption and configuration-sharing design references; installation and downloads for this plugin use the minLaoGe repository linked above.
+
+## 中文
+
+
+为 Obsidian 桌面版打造的百度网盘双向同步插件。当前 1.0.3 仅支持桌面端，最低 Obsidian 版本为 1.14.4；移动端尚未实机验证，暂不发布移动端支持。依托百度网盘大容量云存储，提供**单设备串行执行**、**单文件替换与事务恢复**、**3-Way 冲突副本保护**，并支持**端到端零知识加密 (E2EE)** 与**多设备一键跨端快速配对**机制。
 
 ---
 
