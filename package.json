@@ -1,6 +1,6 @@
 {
   "name": "obsidian-baidu-netdisk-sync",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Atomic and ordered bidirectional sync plugin for Obsidian with Baidu Netdisk (百度网盘)",
   "main": "main.js",
   "scripts": {
@@ -15,7 +15,7 @@
     "atomic",
     "cloud-storage"
   ],
-  "author": "Antigravity",
+  "author": "minLaoGe",
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^22.10.0",
