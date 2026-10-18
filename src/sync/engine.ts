@@ -38,9 +38,13 @@ export class SyncEngine {
 
   public async initialize(): Promise<void> {
     await this.stateStore.load();
-    const cleaned = await this.atomicFs.cleanStaleTempFiles();
+    const { restored, cleaned } = await this.atomicFs.recoverCrashAndCleanStale();
+    if (restored > 0) {
+      this.log("warn", `已自动执行崩溃恢复：成功从灾难备份还原了 ${restored} 个笔记文件！`);
+      new Notice(`[BaiduSync] 崩溃恢复：已自动还原 ${restored} 个笔记文件！`);
+    }
     if (cleaned > 0) {
-      this.log("info", `已清理 ${cleaned} 个遗留的同步临时文件。`);
+      this.log("info", `已清理 ${cleaned} 个历史无用临时/备份文件。`);
     }
   }
 

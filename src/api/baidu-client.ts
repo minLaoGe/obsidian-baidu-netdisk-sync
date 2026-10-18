@@ -330,18 +330,21 @@ export class BaiduClient {
    */
   public async uploadFile(
     remotePath: string,
-    fileBuffer: ArrayBuffer | Buffer
+    fileBuffer: ArrayBuffer | Uint8Array
   ): Promise<{ fsId: string; md5: string }> {
     const token = await this.ensureFreshToken();
-    const buf = Buffer.isBuffer(fileBuffer) ? fileBuffer : Buffer.from(fileBuffer);
-    const { blockList, chunks } = calculateBlockList(buf);
+    const bytes =
+      fileBuffer instanceof Uint8Array
+        ? fileBuffer
+        : new Uint8Array(fileBuffer);
+    const { blockList, chunks } = calculateBlockList(bytes);
     const blockListJson = JSON.stringify(blockList);
 
     // Phase 1: Precreate
     const precreateUrl = `https://pan.baidu.com/rest/2.0/xpan/file?method=precreate&access_token=${token}`;
     const precreateBody = new URLSearchParams({
       path: remotePath,
-      size: String(buf.length),
+      size: String(bytes.length),
       isdir: "0",
       autoinit: "1",
       rtype: "3", // Overwrite on conflict
@@ -378,7 +381,7 @@ export class BaiduClient {
     const createUrl = `https://pan.baidu.com/rest/2.0/xpan/file?method=create&access_token=${token}`;
     const createBody = new URLSearchParams({
       path: remotePath,
-      size: String(buf.length),
+      size: String(bytes.length),
       isdir: "0",
       rtype: "3",
       uploadid: uploadid,
@@ -403,18 +406,19 @@ export class BaiduClient {
 
     return {
       fsId: String(createData.fs_id),
-      md5: createData.md5 || calculateMd5(buf),
+      md5: createData.md5 || calculateMd5(bytes),
     };
   }
 
   /**
    * Upload single block using PCS superfile2 multipart/form-data
+   * Cross-platform without Buffer dependency.
    */
   private async uploadChunk(
     remotePath: string,
     uploadid: string,
     partseq: number,
-    chunkBuffer: Buffer
+    chunkBytes: Uint8Array
   ): Promise<void> {
     const token = await this.ensureFreshToken();
     const url = `https://pcs.baidu.com/rest/2.0/pcs/superfile2?method=upload&type=tmpfile&path=${encodeURIComponent(
@@ -423,12 +427,18 @@ export class BaiduClient {
 
     const boundary = "----BaiduNetdiskFormBoundary" + Math.random().toString(36).substring(2);
     
-    // Construct multipart payload
-    const prefix = Buffer.from(
+    // Construct multipart payload using TextEncoder and Uint8Array
+    const encoder = new TextEncoder();
+    const prefix = encoder.encode(
       `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="chunk_${partseq}"\r\nContent-Type: application/octet-stream\r\n\r\n`
     );
-    const suffix = Buffer.from(`\r\n--${boundary}--\r\n`);
-    const multipartBody = Buffer.concat([prefix, chunkBuffer, suffix]);
+    const suffix = encoder.encode(`\r\n--${boundary}--\r\n`);
+    
+    const totalLength = prefix.length + chunkBytes.length + suffix.length;
+    const multipartBody = new Uint8Array(totalLength);
+    multipartBody.set(prefix, 0);
+    multipartBody.set(chunkBytes, prefix.length);
+    multipartBody.set(suffix, prefix.length + chunkBytes.length);
 
     const res = await requestUrl({
       url,
