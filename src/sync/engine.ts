@@ -38,6 +38,19 @@ export class SyncEngine {
   private debounceManager: DebounceManager = new DebounceManager();
   private isSyncing: boolean = false;
   private logs: SyncLogEntry[] = [];
+  private progressStatus = '就绪';
+  private progressResult: SyncResult | null = null;
+  private progressStartedAt = 0;
+  private progressFinishedAt = 0;
+  private currentFiles = new Set<string>();
+  public getProgress() {
+    const match = /\((\d+)\/(\d+)\)/.exec(this.progressStatus);
+    const result = this.progressResult;
+    return { status: this.progressStatus, busy: this.isSyncing, startedAt: this.progressStartedAt, finishedAt: this.progressFinishedAt,
+      done: match ? Number(match[1]) : 0, total: match ? Number(match[2]) : 0,
+      uploaded: result?.uploaded ?? 0, downloaded: result?.downloaded ?? 0, skipped: result?.skipped ?? 0,
+      conflicted: result?.conflicted ?? 0, errors: result?.errors.length ?? 0, files: [...this.currentFiles] };
+  }
   private onStatusChange?: (statusText: string, isBusy: boolean) => void;
 
   constructor(
@@ -69,6 +82,7 @@ export class SyncEngine {
   }
 
   private setStatus(text: string, isBusy: boolean) {
+    this.progressStatus = text;
     if (this.onStatusChange) {
       this.onStatusChange(text, isBusy);
     }
@@ -214,6 +228,7 @@ export class SyncEngine {
         errors: [],
       };
 
+      this.progressResult = result; this.progressStartedAt = Date.now(); this.progressFinishedAt = 0; this.currentFiles.clear();
       const settings = this.getSettings();
       if (this.disposed || settings.syncPaused) { this.setStatus("已暂停",false); return result; }
       if (!settings.accessToken) {
@@ -290,6 +305,7 @@ export class SyncEngine {
             const work = async () => {
               if (this.getSettings().syncPaused || this.interactiveConflictRequests) return;
               const itemStarted = Date.now();
+              this.currentFiles.add(path); this.setStatus(`同步变更 (${completedWork}/${uploads.length+serial.length})`, true);
               const wasUpload = decision.action === "upload";
               try {
                 // Local content may change while the plan is being scanned or
@@ -332,7 +348,7 @@ export class SyncEngine {
                 return;
               } finally {
                 completed++;
-                completedWork++;
+                completedWork++; this.currentFiles.delete(path);
                 this.setStatus(`同步变更 (${completedWork}/${uploads.length+serial.length})`, true);
               }
               // Checkpoint only completed commits. Save stays serialized and
@@ -387,7 +403,8 @@ export class SyncEngine {
         new Notice(`百度网盘同步错误: ${err.message || String(err)}`);
         this.setStatus("同步出错", false);
       } finally {
-        this.isSyncing = false;
+        this.isSyncing = false; this.progressFinishedAt = Date.now(); this.currentFiles.clear();
+        this.setStatus(this.progressStatus, false);
       }
 
       return result;

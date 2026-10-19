@@ -53,6 +53,7 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
         }));
       new Setting(containerEl).setName("手机同步")
         .addButton(button => button.setButtonText("立即同步").setCta().onClick(async () => { await this.plugin.runSync(); }))
+        .addButton(button => button.setButtonText("查看进度").onClick(() => this.plugin.openSyncProgress()))
         .addButton(button => button.setButtonText("查看冲突").onClick(() => this.plugin.openConflictReview()));
     }
 

@@ -65,3 +65,13 @@
 .baidu-merge-removed { background: rgba(220,60,60,.15); }
 .baidu-merge-added { background: rgba(40,180,90,.15); }
 .baidu-merge-editor { width: 100%; min-height: 32vh; font-family: var(--font-monospace); white-space: pre; }
+
+.baidu-sync-mobile-progress { position: fixed; z-index: 10000; left: 12px; right: 12px; bottom: calc(64px + env(safe-area-inset-bottom, 0px)); padding: 10px 12px; background: var(--background-primary); border: 1px solid var(--background-modifier-border); border-radius: 12px; color: var(--text-normal); box-shadow: 0 4px 18px #0003; }
+.baidu-sync-progress-header { display: flex; align-items: center; gap: 8px; }
+.baidu-sync-progress-open { flex: 1; text-align: left; white-space: normal; padding: 2px 0; height: auto; border: none; box-shadow: none; background: transparent; font-weight: 600; }
+.baidu-sync-mobile-progress progress, .baidu-sync-progress-bar { display: block; width: 100%; height: 8px; margin: 8px 0; accent-color: var(--interactive-accent); }
+.baidu-sync-progress-detail { white-space: pre-line; font-size: 12px; line-height: 1.6; color: var(--text-muted); }
+.baidu-sync-progress-modal { width: min(620px, 95vw); }
+.baidu-sync-progress-file { overflow-wrap: anywhere; font-size: 13px; padding: 4px 0; }
+.baidu-sync-progress-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.baidu-sync-progress-logs { font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }

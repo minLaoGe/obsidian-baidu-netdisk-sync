@@ -1,3 +1,4 @@
+import { MobileSyncProgress } from './progress-ui';
 import { Notice, Platform, Plugin } from "obsidian";
 import { BaiduClient } from "./api/baidu-client";
 import { BaiduSyncSettingTab, DEFAULT_SETTINGS } from "./settings";
@@ -12,8 +13,8 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
   private statusBarItem!: HTMLElement;
   private autoSyncIntervalId?: number;
   private startupSyncTimeoutId?: number;
-  private mobileProgressNotice?: Notice;
-  private mobileProgressHideId?: number;
+  private mobileProgress?: MobileSyncProgress;
+  private manualSync?: Promise<void>;
 
   async onload() {
     console.log("Loading Baidu Netdisk Sync Plugin...");
@@ -48,6 +49,8 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
       }
     );
 
+    if (Platform.isMobile) this.mobileProgress = this.addChild(new MobileSyncProgress(this));
+    this.addCommand({ id: 'show-baidu-sync-progress', name: '查看百度同步进度', callback: () => this.openSyncProgress() });
     await this.syncEngine.initialize();
     this.updateStatusBar(this.settings.syncPaused ? "已暂停" : "就绪", false);
     if (this.syncEngine.getPendingConflicts().length) {
@@ -119,8 +122,6 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
   onunload() {
     console.log("Unloading Baidu Netdisk Sync Plugin...");
     this.syncEngine?.dispose();
-    this.mobileProgressNotice?.hide();
-    if (this.mobileProgressHideId !== undefined) window.clearTimeout(this.mobileProgressHideId);
     if (this.startupSyncTimeoutId !== undefined) window.clearTimeout(this.startupSyncTimeoutId);
     if (this.autoSyncIntervalId) {
       window.clearInterval(this.autoSyncIntervalId);
@@ -143,22 +144,7 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
   }
 
   public updateStatusBar(status: string, isBusy: boolean) {
-    if (Platform.isMobile && (isBusy || this.mobileProgressNotice)) {
-      if (this.mobileProgressHideId !== undefined) {
-        window.clearTimeout(this.mobileProgressHideId);
-        this.mobileProgressHideId = undefined;
-      }
-      const text = `百度同步：${status}${isBusy ? "\n请保持 Obsidian 在前台" : ""}`;
-      if (this.mobileProgressNotice) this.mobileProgressNotice.setMessage(text);
-      else this.mobileProgressNotice = new Notice(text, 0);
-      if (!isBusy) {
-        this.mobileProgressHideId = window.setTimeout(() => {
-          this.mobileProgressNotice?.hide();
-          this.mobileProgressNotice = undefined;
-          this.mobileProgressHideId = undefined;
-        }, 8000);
-      }
-    }
+    if (Platform.isMobile) this.mobileProgress?.update();
     if (!this.statusBarItem) return;
     const icon = isBusy ? "⏳ " : "☁️ ";
     const pending = this.syncEngine?.getPendingConflicts().length || 0;
@@ -170,6 +156,8 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
     };
   }
 
+  public openSyncProgress() { this.mobileProgress?.open(); }
+
   public openConflictReview() { new ConflictReviewModal(this.app, this.syncEngine).open(); }
 
   public async runSync(forceFull=false) {
@@ -178,7 +166,10 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
       new Notice("请先在设置中配置百度网盘 Access Token！");
       return;
     }
-    await this.syncEngine.runFullSync(forceFull);
+    if (Platform.isMobile) this.openSyncProgress();
+    if (this.manualSync) return this.manualSync;
+    const task = this.syncEngine.runFullSync(forceFull).then(() => {}); this.manualSync = task;
+    try { await task; } finally { if (this.manualSync === task) this.manualSync = undefined; this.mobileProgress?.update(); }
   }
 
   public resetAutoSyncTimer() {
