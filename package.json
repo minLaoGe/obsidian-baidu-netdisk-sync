@@ -5,7 +5,7 @@
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
-    "test": "node tests/reliability.cjs && node tests/concurrency.cjs && node tests/upload-protocol.cjs && node tests/delta.cjs && node tests/inventory.cjs && node tests/conflicts-ui.cjs && node tests/merge.cjs",
+    "test": "node tests/reliability.cjs && node tests/concurrency.cjs && node tests/upload-protocol.cjs && node tests/delta.cjs && node tests/inventory.cjs && node tests/conflicts-ui.cjs && node tests/merge.cjs && node tests/remote-index.cjs",
     "typecheck": "tsc --noEmit",
     "build": "node esbuild.config.mjs production"
   },

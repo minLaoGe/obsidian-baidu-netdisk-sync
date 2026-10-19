@@ -30,7 +30,8 @@ export function sameFileVersion(local: FileStateInspection, remote: FileStateIns
 export function determineSyncAction(
   local: FileStateInspection,
   remote: FileStateInspection,
-  base?: SyncMetadataEntry
+  base?: SyncMetadataEntry,
+  verifiedIncrementalDeletion = false
 ): ConflictDecision {
   if (sameFileVersion(local,remote)) return {action:"noop",reason:"Verified identical content and modification time",isConflict:false};
   // Scenario 1: File is in Base snapshot
@@ -50,11 +51,13 @@ export function determineSyncAction(
 
     // 1.3 Local deleted, remote unchanged -> delete remote
     if (!local.exists && !remoteChanged) {
+      if(verifiedIncrementalDeletion) return {action:"delete_remote",reason:"Tracked local deletion; remote version unchanged",isConflict:false};
       return { action: "conflict", conflictSubtype:"local_deleted_remote_modified", reason: "Local deletion requires human confirmation", isConflict: true };
     }
 
     // 1.4 Remote deleted, local unchanged -> delete local
     if (!remote.exists && !localChanged) {
+      if(verifiedIncrementalDeletion) return {action:"delete_local",reason:"Verified indexed remote deletion; local version unchanged",isConflict:false};
       return { action: "conflict", conflictSubtype:"remote_deleted_local_modified", reason: "Remote deletion requires human confirmation", isConflict: true };
     }
 

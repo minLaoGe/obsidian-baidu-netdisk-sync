@@ -168,7 +168,7 @@ node tests/benchmark-live.cjs /absolute/path/to/plugin/data.json --large-only
 
 ## Directory enumeration and deletion safety fix
 
-Baidu `method=list` ignores the recursion flag. The plugin now explicitly enumerates every subdirectory and follows full pages even when `has_more` is omitted. Missing child directories, malformed responses, repeated pages and out-of-directory entries abort the scan before applying any plan. All deletion propagation now awaits manual confirmation. Atomic write locks are shared across module copies in one renderer; only a fully cleaned stale journal entry may be skipped, while orphan payloads remain blocked and preserved. “暂停所有同步” blocks full, scheduled, local-change sync and resolution commits.
+Baidu `method=list` ignores the recursion flag. The plugin now explicitly enumerates every subdirectory and follows full pages even when `has_more` is omitted. Missing child directories, malformed responses, repeated pages and out-of-directory entries abort the scan before applying any plan. Cold-start/audit deletions await manual confirmation. In validated incremental rounds (or local-change events), tracked deletion propagates automatically only when the other version still matches the baseline; modify/delete conflicts remain manual. Atomic write locks are shared across module copies in one renderer; only a fully cleaned stale journal entry may be skipped, while orphan payloads remain blocked and preserved. “暂停所有同步” blocks full, scheduled, local-change sync and resolution commits.
 
 ## 相同版本去重
 
@@ -183,3 +183,19 @@ Baidu `method=list` ignores the recursion flag. The plugin now explicitly enumer
 冲突列表支持逐项勾选、全选，再批量接受所选本地或远端版本。确认窗口说明覆盖和删除方向；逐项提交，成功项移出列表，失败项保留并显示原因。接受远端前备份被替换的本地内容，远端再次变化时拒绝覆盖并要求重新检查。
 
 批量冲突操作会等待当前文件安全完成，并让全量扫描/后续传输让出执行机会；不使用不完整的远端清单作删除判断。窗口显示等待状态和逐项进度，关闭窗口不取消已经提交的任务。
+
+## 增量同步索引
+
+默认启用“增量同步索引”。首次同步扫描全部网盘目录，在插件数据目录生成原子保存、带校验和的 `remote-index.json`；后续先列出远端 `.baidu-sync-index-v1` 中的独立变更记录，只检查受影响目录。无变化时不递归列举笔记目录、不重新下载历史记录。仍读取本地文件内容计算哈希，避免仅凭时间戳漏掉改动。
+
+- 批量上传共用分组变更记录（每组最多 200 个路径），不为每个文件额外生成一对记录；单文件实时同步单独登记。
+- 先成功发布 begin 记录，才允许上传或删除原文件；最后发布 done。中断留下的 begin 会在每轮复查真实远端状态。记录不是“文件已删除”的依据：删除前重新查询真实目录，并比较同步基线。
+- 两台设备使用随机独立记录名，不覆盖同一个总 JSON。上传失败、记录发布失败、目录响应异常或索引校验失败均不会推进不可靠状态；本地检查点继续使用原子写入。
+- 增量轮次中，已跟踪文件删除且另一端未修改时，自动同步删除；本地删除进入回收站。修改/删除冲突、首次同步和完整校验发现的删除继续人工确认，已有冲突不会被自动清除。
+- 每 24 小时完整校验一次；命令面板“完整校验网盘并同步（重建增量索引）”或设置中的“立即完整校验”可主动执行。索引损坏、历史记录被修改或移除时回退完整校验，绝不拿不完整清单判定删除。
+- 直接在百度网盘或未升级的客户端中修改不会生成记录，需要完整校验才能全部发现。使用此模式的设备应都升级；覆盖前仍重新查询目标的真实远端版本。百度普通文件覆盖接口不提供跨设备条件写入锁，这套索引不承诺将同一文件的并发编辑自动合并。
+- 远端控制目录不当作笔记同步，索引与记录中不保存令牌或密码。当前不自动清理记录，避免离线设备漏掉历史变化；记录积累较多时列举成本会随之增长。
+
+新增测试涵盖两份独立知识库共享同一远端的新增、修改、删除、修改/删除冲突、无变化请求数、并发记录、索引损坏、未完成提交、索引丢失、强制校验与失败回退。
+
+一次真实网盘只读验证（2026-10-19，2,124 个文件）：首次完整索引 123 次请求、54.7 秒；紧接的无变更检查 1 次请求、0.3 秒。该数字仅包含远端索引检查，不包含本地哈希扫描或文件传输；不同网络与目录规模会影响耗时。可用 `node tests/index-live-readonly.cjs /absolute/path/to/plugin/data.json /absolute/path/to/vault` 复测，须先安全停止在途同步；此诊断不写入网盘，只原子保存本机索引。

@@ -13,6 +13,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   username: "",
   remoteBasePath: "/apps/obsidian-vault",
   autoSync: false,
+  incrementalSync: true,
   syncPaused: false,
   uploadConcurrency: 3,
   syncIntervalMinutes: 15,
@@ -419,6 +420,15 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
+
+    new Setting(containerEl).setName("增量同步索引")
+      .setDesc("默认开启：日常只检查变更记录和受影响目录；首次、索引异常或每 24 小时完整校验。旧版设备或直接在网盘修改的内容由完整校验发现。")
+      .addToggle(t=>t.setValue(this.plugin.settings.incrementalSync).onChange(async value=>{
+        this.plugin.settings.incrementalSync=value;await this.plugin.saveSettings();
+      }));
+    new Setting(containerEl).setName("完整校验同步")
+      .setDesc("立即扫描全部目录，用于发现直接在网盘或旧版客户端修改的文件。")
+      .addButton(b=>b.setButtonText("立即完整校验").onClick(async()=>{await this.plugin.runSync(true);}));
 
     new Setting(containerEl).setName("暂停所有同步")
       .setDesc("暂停全量、定时、本地修改同步和冲突提交；已开始的单个文件操作完成后停止。")

@@ -68,6 +68,8 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
       },
     });
 
+    this.addCommand({id:"audit-baidu-netdisk",name:"完整校验网盘并同步（重建增量索引）",callback:async()=>{await this.runSync(true);}});
+
     // 6. Register Setting Tab
     this.addSettingTab(new BaiduSyncSettingTab(this.app, this));
 
@@ -145,13 +147,13 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
 
   public openConflictReview() { new ConflictReviewModal(this.app, this.syncEngine).open(); }
 
-  public async runSync() {
+  public async runSync(forceFull=false) {
     if (this.settings.syncPaused) { new Notice("同步已暂停，请先在插件设置中解除暂停。"); return; }
     if (!this.settings.accessToken) {
       new Notice("请先在设置中配置百度网盘 Access Token！");
       return;
     }
-    await this.syncEngine.runFullSync();
+    await this.syncEngine.runFullSync(forceFull);
   }
 
   public resetAutoSyncTimer() {

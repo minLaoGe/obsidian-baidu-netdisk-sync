@@ -1,3 +1,4 @@
+import { RemoteIndex, INDEX_DIR } from "./remote-index";
 import { hasConflictMarkers } from "./merge";
 import { App, Notice, TAbstractFile, TFile } from "obsidian";
 import { BaiduClient } from "../api/baidu-client";
@@ -16,6 +17,7 @@ export class SyncEngine {
   private client: BaiduClient;
   private syncMutex: Mutex = new Mutex();
   private interactiveConflictRequests=0;
+  private batchJournalActive=false;
   private taskQueue: FifoQueue = new FifoQueue();
   private debounceManager: DebounceManager = new DebounceManager();
   private isSyncing: boolean = false;
@@ -84,6 +86,7 @@ export class SyncEngine {
   private shouldIgnore(vaultPath: string): boolean {
     const norm = normalizeVaultPath(vaultPath);
     if (!norm) return true;
+    if(norm===INDEX_DIR || norm.startsWith(INDEX_DIR+"/")) return true;
     if (/\.conflict-\d{8}-\d{6}(?:-[a-z0-9]+)?(?:\.|$)/.test(norm)) return true;
     
     // Ignore internal temporary and system folders
@@ -166,7 +169,7 @@ export class SyncEngine {
         }
         const remoteInspection = await this.inspectRemoteFile(remotePath);
 
-        const decision = determineSyncAction(localInspection, remoteInspection, base);
+        const decision = determineSyncAction(localInspection, remoteInspection, base, !!(settings.incrementalSync && localChangeOnly));
 
         if (decision.action === "noop") {
           if (this.rememberIdenticalVersion(vaultPath,localInspection,remoteInspection,base)) await this.stateStore.save();
@@ -183,7 +186,7 @@ export class SyncEngine {
   /**
    * Run full bidirectional synchronization
    */
-  public async runFullSync(): Promise<SyncResult> {
+  public async runFullSync(forceFull=false): Promise<SyncResult> {
     return this.syncMutex.acquire(async () => {
       const result: SyncResult = {
         total: 0,
@@ -205,7 +208,7 @@ export class SyncEngine {
       const startedAt = Date.now();
       this.isSyncing = true;
       this.setStatus("正在同步...", true);
-      this.log("info", "开始执行全量双向同步比对...");
+      this.log("info", "开始检查同步变更...");
 
       try {
         // 1. Gather all local files
@@ -217,8 +220,10 @@ export class SyncEngine {
         }
 
         // 2. Gather all remote files
-        this.setStatus("获取网盘文件列表...", true);
-        const remoteList = await this.client.listFiles(settings.remoteBasePath, true,()=>this.interactiveConflictRequests>0);
+        this.setStatus(settings.incrementalSync ? "检查远端变更记录..." : "完整校验网盘目录...", true);
+        const indexed=settings.incrementalSync ? await this.remoteIndex().inventory(forceFull) : undefined;
+        const remoteList=indexed ? indexed.files : await this.client.listFiles(settings.remoteBasePath,true,()=>this.interactiveConflictRequests>0);
+        if(indexed) this.log("info",indexed.incremental ? `增量检查：远端 ${indexed.changed} 个变更路径` : "完整目录校验完成，后续使用增量索引");
         const remoteMap: Map<string, RemoteFileInfo> = new Map();
         for (const rItem of remoteList) {
           if (rItem.isdir === 1) continue;
@@ -243,11 +248,13 @@ export class SyncEngine {
         // after all uploads settle, preserving the existing atomic-write lock.
         const uploads: Array<() => Promise<void>> = [];
         const serial: Array<() => Promise<void>> = [];
+        const mutationPaths:string[]=[];
         let completed = 0;
+        let completedWork=0;
         let acceptedIdentical = false;
         for (const path of allPaths) {
           if(this.interactiveConflictRequests) break;
-          this.setStatus(`检查文件 (${uploads.length + serial.length + completed + 1}/${allPaths.size})`, true);
+          this.setStatus(`检查本地变更 (${uploads.length + serial.length + completed + 1}/${allPaths.size})`, true);
           try {
             if (this.shouldIgnore(path)) { completed++; result.skipped++; continue; }
             const remotePath = toRemotePath(settings.remoteBasePath, path);
@@ -255,11 +262,11 @@ export class SyncEngine {
             const localFile = localMap.get(path);
             let localInspection = await this.inspectLocalFile(path, localFile);
             const remoteItem = remoteMap.get(path);
-            const remoteInspection: FileStateInspection = remoteItem
+            let remoteInspection: FileStateInspection = remoteItem
               ? { exists: true, mtime: remoteItem.serverMtime, md5: remoteItem.md5,
                   size: remoteItem.size, fsId: remoteItem.fsId }
               : { exists: false };
-            let decision = determineSyncAction(localInspection, remoteInspection, base);
+            let decision = determineSyncAction(localInspection, remoteInspection, base, indexed?.incremental === true);
             if (decision.action === "noop") {
               acceptedIdentical = this.rememberIdenticalVersion(path,localInspection,remoteInspection,base) || acceptedIdentical;
               completed++; result.skipped++; continue;
@@ -272,7 +279,15 @@ export class SyncEngine {
                 // Local content may change while the plan is being scanned or
                 // waiting for a worker. Recheck before any overwrite/deletion.
                 localInspection = await this.inspectLocalFile(path);
-                decision = determineSyncAction(localInspection, remoteInspection, base);
+                if(indexed?.incremental) {
+                  const actual=await this.inspectRemoteFile(remotePath);
+                  if(actual.exists!==remoteInspection.exists || actual.md5!==remoteInspection.md5 || actual.fsId!==remoteInspection.fsId) {
+                    // An unjournaled/late edit was observed. Never keep using the stale cache next round.
+                    await this.remoteIndex().invalidate();
+                  }
+                  remoteInspection=actual;
+                }
+                decision = determineSyncAction(localInspection, remoteInspection, base, indexed?.incremental === true);
                 if (wasUpload && decision.action !== "upload") {
                   this.log("warn", `文件在排队期间发生变化，留待下次同步: ${path}`);
                   return;
@@ -301,7 +316,8 @@ export class SyncEngine {
                 return;
               } finally {
                 completed++;
-                this.setStatus(`同步进度 (${completed}/${allPaths.size})`, true);
+                completedWork++;
+                this.setStatus(`同步变更 (${completedWork}/${uploads.length+serial.length})`, true);
               }
               // Checkpoint only completed commits. Save stays serialized and
               // atomic; a checkpoint failure stops new work and drains workers.
@@ -311,6 +327,7 @@ export class SyncEngine {
               }
             };
             (decision.action === "upload" ? uploads : serial).push(work);
+            if(decision.action==="upload" || decision.action==="delete_remote") mutationPaths.push(path);
           } catch (itemErr: any) {
             completed++;
             this.log("error", `同步失败: ${path}`, itemErr.message || String(itemErr));
@@ -321,8 +338,16 @@ export class SyncEngine {
         const concurrency = Math.max(1, Math.min(3, Math.floor(settings.uploadConcurrency || 3)));
         this.log("info", `上传计划: ${uploads.length} 个文件，并发 ${concurrency}`);
         if (uploads.length) await this.client.createDirectory(settings.remoteBasePath);
-        await runBounded(uploads, concurrency, work => work());
-        for (const work of serial) await work();
+        const executePlan=async()=>{
+          await runBounded(uploads, concurrency, work => work());
+          for (const work of serial) await work();
+        };
+        if(settings.incrementalSync && mutationPaths.length) {
+          await this.remoteIndex().mutateMany(mutationPaths,async()=>{
+            this.batchJournalActive=true;
+            try {await executePlan();} finally {this.batchJournalActive=false;}
+          });
+        } else await executePlan();
 
         // 5. Update state and commit
         if (result.uploaded || result.downloaded || result.conflicted || result.deleted) {
@@ -382,7 +407,7 @@ export class SyncEngine {
           buffer = await encryptData(buffer, settings.e2eePassword);
         }
 
-        const uploadResult = await this.client.uploadFile(remotePath, buffer);
+        const uploadResult = await this.remoteMutation(localPath,()=>this.client.uploadFile(remotePath, buffer));
 
         this.stateStore.set(localPath, {
           path: localPath,
@@ -435,7 +460,7 @@ export class SyncEngine {
       }
 
       case "delete_remote": {
-        await this.client.deleteFile(remotePath);
+        await this.remoteMutation(localPath,()=>this.client.deleteFile(remotePath));
         this.stateStore.delete(localPath);
         break;
       }
@@ -446,6 +471,15 @@ export class SyncEngine {
         break;
       }
     }
+  }
+
+  private remoteIndex():RemoteIndex {
+    const settings=this.getSettings();
+    const scope=calculateMd5(new TextEncoder().encode(JSON.stringify([settings.remoteBasePath,settings.appKey,settings.username])).buffer);
+    return new RemoteIndex(this.app,this.client,settings.remoteBasePath,scope,m=>this.log("info",m),()=>this.interactiveConflictRequests>0,text=>this.setStatus(text,true));
+  }
+  private async remoteMutation<T>(path:string,operation:()=>Promise<T>):Promise<T> {
+    return this.getSettings().incrementalSync && !this.batchJournalActive ? this.remoteIndex().mutate(path,operation) : operation();
   }
 
   private rememberIdenticalVersion(path: string, local: FileStateInspection,
@@ -640,7 +674,7 @@ export class SyncEngine {
         if (!remote.exists) await this.client.createDirectory(this.getSettings().remoteBasePath);
         await this.executeAction(path, record.remotePath, {action:"upload",reason:"User confirmed merge",isConflict:false},local,remote);
       } else if (remote.exists) {
-        await this.client.deleteFile(record.remotePath);
+        await this.remoteMutation(path,()=>this.client.deleteFile(record.remotePath));
         this.stateStore.delete(path);
       } else this.stateStore.delete(path);
       this.stateStore.clearConflict(path);
