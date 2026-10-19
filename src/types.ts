@@ -39,7 +39,7 @@ export interface PluginSettings {
   syncThemes: boolean;
 }
 
-export type ConflictStrategy = "create_conflict_file" | "keep_newer" | "keep_local" | "keep_remote";
+export type ConflictStrategy = "git_merge" | "create_conflict_file" | "keep_newer" | "keep_local" | "keep_remote";
 
 export interface RemoteFileInfo {
   fsId: string;

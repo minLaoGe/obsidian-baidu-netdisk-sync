@@ -1,5 +1,5 @@
 import { RemoteIndex, INDEX_DIR } from "./remote-index";
-import { hasConflictMarkers } from "./merge";
+import { hasConflictMarkers, mergeText } from "./merge";
 import { App, Notice, TAbstractFile, TFile } from "obsidian";
 import { BaiduClient } from "../api/baidu-client";
 import { decryptData, encryptData, isEncrypted } from "../crypto/e2ee";
@@ -534,6 +534,44 @@ export class SyncEngine {
         this.log("info",`内容及修改时间相同，保留原文件: ${localPath}`);
         return;
       }
+      const strategy = this.getSettings().conflictStrategy || "create_conflict_file";
+      const isText = /\.(md|markdown|txt|json|csv|yaml|yml|xml|html|css|js|ts|log)$/i.test(localPath);
+      if (strategy === "git_merge" && isText && local.exists) {
+        let localText: string | null = null;
+        let remoteText: string | null = null;
+        try {
+          const localBytes = await this.atomicFs.readBinary(localPath);
+          localText = new TextDecoder("utf-8", { fatal: true }).decode(localBytes);
+          remoteText = new TextDecoder("utf-8", { fatal: true }).decode(data);
+          if (localText.includes("\0") || remoteText.includes("\0")) {
+            localText = null;
+            remoteText = null;
+          }
+        } catch {
+          localText = null;
+          remoteText = null;
+        }
+
+        if (localText !== null && remoteText !== null) {
+          if (!hasConflictMarkers(localText)) {
+            const result = mergeText(localText, remoteText);
+            const mergedBytes = new TextEncoder().encode(result.merged);
+            await this.atomicFs.atomicWrite(localPath, mergedBytes, calculateMd5(mergedBytes));
+          }
+          const record: PendingConflict = {
+            path: localPath,
+            remotePath,
+            copies: existing?.copies || [],
+            remote: { exists: remote.exists, md5: remote.md5, fsId: remote.fsId, mtime: remote.mtime },
+            createdAt: existing?.createdAt || Date.now(),
+          };
+          this.stateStore.setConflict(record);
+          await this.stateStore.save();
+          this.log("warn", `已按 Git 格式在单文件内合并冲突标记: ${localPath}`);
+          new Notice(`百度同步发现冲突：${localPath}\n已像 Git 一样在文档内直接标出冲突区域（<<<<<<< LOCAL ... >>>>>>> REMOTE），未产生多余文件，请直接在文档中编辑解决！`, 15000);
+          return;
+        }
+      }
       if (existing && existing.remote.md5 === remote.md5 && existing.remote.fsId === remote.fsId &&
           existing.remote.exists === remote.exists && existing.copies.length &&
           await this.app.vault.adapter.exists(existing.copies[existing.copies.length-1])) return;
@@ -567,8 +605,22 @@ export class SyncEngine {
     };
     const local=await read(path);
     const copy=record.copies[record.copies.length-1];
-    const remote=record.remote.exists ? (copy ? await read(copy) : null) : null;
-    if(record.remote.exists && remote===null) throw new Error("远端副本缺失，请先更新远端副本");
+    let remote: string | null = null;
+    if (record.remote.exists) {
+      if (copy && (await this.app.vault.adapter.exists(copy))) {
+        remote = await read(copy);
+      } else if (record.remote.fsId) {
+        let raw = await this.client.downloadFile(record.remote.fsId);
+        if (isEncrypted(raw) || this.getSettings().enableE2EE) {
+          const pwd = this.getSettings().e2eePassword;
+          if (pwd) {
+            raw = await decryptData(raw, pwd);
+          }
+        }
+        remote = new TextDecoder("utf-8").decode(raw);
+      }
+    }
+    if (record.remote.exists && remote === null) throw new Error("远端副本缺失，请先更新远端副本");
     return {local,remote,signature:JSON.stringify(record)};
   }
 

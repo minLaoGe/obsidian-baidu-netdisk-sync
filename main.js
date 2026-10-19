@@ -905,7 +905,7 @@ var DEFAULT_SETTINGS = {
   syncIntervalMinutes: 15,
   syncOnStartup: true,
   syncOnModifyDebounceSeconds: 3,
-  conflictStrategy: "create_conflict_file",
+  conflictStrategy: "git_merge",
   ignoredPatterns: [".trash", ".git", ".DS_Store"],
   enableE2EE: false,
   e2eePassword: "",
@@ -1112,6 +1112,15 @@ var BaiduSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
     new import_obsidian2.Setting(containerEl).setName("\u4E0A\u4F20\u5E76\u53D1\u6570").setDesc("\u5168\u91CF\u540C\u6B65\u540C\u65F6\u4E0A\u4F20 1\u20133 \u4E2A\u4E0D\u540C\u6587\u4EF6\uFF1B\u5355\u6587\u4EF6\u63D0\u4EA4\u3001\u4E0B\u8F7D\u3001\u51B2\u7A81\u5904\u7406\u548C\u672C\u5730\u539F\u5B50\u5199\u5165\u4ECD\u4FDD\u6301\u987A\u5E8F\u3002").addDropdown(
       (dropdown) => dropdown.addOptions({ "1": "1\uFF08\u4E32\u884C\uFF09", "2": "2", "3": "3\uFF08\u63A8\u8350\uFF09" }).setValue(String(this.plugin.settings.uploadConcurrency || 3)).onChange(async (value) => {
         this.plugin.settings.uploadConcurrency = Number(value);
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian2.Setting(containerEl).setName("\u51B2\u7A81\u89E3\u51B3\u6A21\u5F0F").setDesc("\u53D1\u751F\u53CC\u5411\u4FEE\u6539\u51B2\u7A81\u65F6\u7684\u5904\u7406\u65B9\u5F0F\u3002Git \u5355\u6587\u4EF6\u5408\u5E76\u6A21\u5F0F\uFF08\u63A8\u8350\uFF09\u4F1A\u50CF Git \u4E00\u6837\u76F4\u63A5\u5728\u5F53\u524D\u6B63\u6587\u4E2D\u6807\u51FA <<<<<<< LOCAL / ======= / >>>>>>> REMOTE\uFF0C\u4E0D\u4EA7\u751F\u989D\u5916\u526F\u672C\u6587\u4EF6\u3002").addDropdown(
+      (dropdown) => dropdown.addOptions({
+        git_merge: "Git \u6807\u8BB0\u5408\u5E76\uFF08\u63A8\u8350\uFF1A\u5355\u6587\u4EF6\u5185\u6807\u6CE8\u51B2\u7A81\uFF0C\u4E0D\u751F\u6210\u526F\u672C\uFF09",
+        create_conflict_file: "\u53CC\u526F\u672C\u4FDD\u7559\uFF08\u751F\u6210\u5E26\u65F6\u95F4\u6233\u7684\u72EC\u7ACB .conflict \u526F\u672C\u6587\u4EF6\uFF09"
+      }).setValue(this.plugin.settings.conflictStrategy || "git_merge").onChange(async (value) => {
+        this.plugin.settings.conflictStrategy = value;
         await this.plugin.saveSettings();
       })
     );
@@ -2464,6 +2473,44 @@ var SyncEngine = class {
         this.log("info", `\u5185\u5BB9\u53CA\u4FEE\u6539\u65F6\u95F4\u76F8\u540C\uFF0C\u4FDD\u7559\u539F\u6587\u4EF6: ${localPath}`);
         return;
       }
+      const strategy = this.getSettings().conflictStrategy || "create_conflict_file";
+      const isText = /\.(md|markdown|txt|json|csv|yaml|yml|xml|html|css|js|ts|log)$/i.test(localPath);
+      if (strategy === "git_merge" && isText && local.exists) {
+        let localText = null;
+        let remoteText = null;
+        try {
+          const localBytes = await this.atomicFs.readBinary(localPath);
+          localText = new TextDecoder("utf-8", { fatal: true }).decode(localBytes);
+          remoteText = new TextDecoder("utf-8", { fatal: true }).decode(data);
+          if (localText.includes("\0") || remoteText.includes("\0")) {
+            localText = null;
+            remoteText = null;
+          }
+        } catch {
+          localText = null;
+          remoteText = null;
+        }
+        if (localText !== null && remoteText !== null) {
+          if (!hasConflictMarkers(localText)) {
+            const result = mergeText(localText, remoteText);
+            const mergedBytes = new TextEncoder().encode(result.merged);
+            await this.atomicFs.atomicWrite(localPath, mergedBytes, calculateMd5(mergedBytes));
+          }
+          const record2 = {
+            path: localPath,
+            remotePath,
+            copies: existing?.copies || [],
+            remote: { exists: remote.exists, md5: remote.md5, fsId: remote.fsId, mtime: remote.mtime },
+            createdAt: existing?.createdAt || Date.now()
+          };
+          this.stateStore.setConflict(record2);
+          await this.stateStore.save();
+          this.log("warn", `\u5DF2\u6309 Git \u683C\u5F0F\u5728\u5355\u6587\u4EF6\u5185\u5408\u5E76\u51B2\u7A81\u6807\u8BB0: ${localPath}`);
+          new import_obsidian4.Notice(`\u767E\u5EA6\u540C\u6B65\u53D1\u73B0\u51B2\u7A81\uFF1A${localPath}
+\u5DF2\u50CF Git \u4E00\u6837\u5728\u6587\u6863\u5185\u76F4\u63A5\u6807\u51FA\u51B2\u7A81\u533A\u57DF\uFF08<<<<<<< LOCAL ... >>>>>>> REMOTE\uFF09\uFF0C\u672A\u4EA7\u751F\u591A\u4F59\u6587\u4EF6\uFF0C\u8BF7\u76F4\u63A5\u5728\u6587\u6863\u4E2D\u7F16\u8F91\u89E3\u51B3\uFF01`, 15e3);
+          return;
+        }
+      }
       if (existing && existing.remote.md5 === remote.md5 && existing.remote.fsId === remote.fsId && existing.remote.exists === remote.exists && existing.copies.length && await this.app.vault.adapter.exists(existing.copies[existing.copies.length - 1])) return;
       copyPath = generateConflictPath(localPath);
       while (await this.app.vault.adapter.exists(copyPath)) copyPath = generateConflictPath(localPath);
@@ -2495,7 +2542,21 @@ var SyncEngine = class {
     };
     const local = await read(path);
     const copy = record.copies[record.copies.length - 1];
-    const remote = record.remote.exists ? copy ? await read(copy) : null : null;
+    let remote = null;
+    if (record.remote.exists) {
+      if (copy && await this.app.vault.adapter.exists(copy)) {
+        remote = await read(copy);
+      } else if (record.remote.fsId) {
+        let raw = await this.client.downloadFile(record.remote.fsId);
+        if (isEncrypted(raw) || this.getSettings().enableE2EE) {
+          const pwd = this.getSettings().e2eePassword;
+          if (pwd) {
+            raw = await decryptData(raw, pwd);
+          }
+        }
+        remote = new TextDecoder("utf-8").decode(raw);
+      }
+    }
     if (record.remote.exists && remote === null) throw new Error("\u8FDC\u7AEF\u526F\u672C\u7F3A\u5931\uFF0C\u8BF7\u5148\u66F4\u65B0\u8FDC\u7AEF\u526F\u672C");
     return { local, remote, signature: JSON.stringify(record) };
   }

@@ -19,7 +19,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   syncIntervalMinutes: 15,
   syncOnStartup: true,
   syncOnModifyDebounceSeconds: 3,
-  conflictStrategy: "create_conflict_file",
+  conflictStrategy: "git_merge",
   ignoredPatterns: [".trash", ".git", ".DS_Store"],
   enableE2EE: false,
   e2eePassword: "",
@@ -326,6 +326,22 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
           .setValue(String(this.plugin.settings.uploadConcurrency || 3))
           .onChange(async (value) => {
             this.plugin.settings.uploadConcurrency = Number(value);
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("冲突解决模式")
+      .setDesc("发生双向修改冲突时的处理方式。Git 单文件合并模式（推荐）会像 Git 一样直接在当前正文中标出 <<<<<<< LOCAL / ======= / >>>>>>> REMOTE，不产生额外副本文件。")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOptions({
+            git_merge: "Git 标记合并（推荐：单文件内标注冲突，不生成副本）",
+            create_conflict_file: "双副本保留（生成带时间戳的独立 .conflict 副本文件）"
+          })
+          .setValue(this.plugin.settings.conflictStrategy || "git_merge")
+          .onChange(async (value) => {
+            this.plugin.settings.conflictStrategy = value as ConflictStrategy;
             await this.plugin.saveSettings();
           })
       );
