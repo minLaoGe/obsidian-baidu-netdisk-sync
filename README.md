@@ -5,9 +5,11 @@
 An Obsidian plugin for desktop, Android, and iOS for bidirectional sync with Baidu Netdisk. Requires
 **Obsidian 1.14.4+**, a Baidu Netdisk account, and a Baidu developer application.
 
-- **Bounded uploads:** full sync uploads 1–3 independent files concurrently (default 3). Each file retains ordered precreate, missing-block upload, and final commit.
+- **Bounded transfers:** full sync uploads and downloads 1–3 independent files concurrently (configurable in settings). Each file retains ordered precreate, missing-block upload, and atomic commit.
+- **Large file protection:** uses HTTP Range 4MB chunked streaming to prevent Android Capacitor Base64 OutOfMemoryError crashes.
+- **Identical content auto-resolution:** files with matching MD5 hashes are automatically resolved and cleaned up without generating redundant `.conflict` copies.
 - **Delta sync:** unchanged files are skipped. Identical-content local save events make no Baidu request. Full sync still checks the remote inventory for edits on other devices.
-- **Human-reviewed conflicts:** keep the local original and remote snapshot, persist a pending record, and pause that file until the user merges and confirms. Notices, a status-bar count, a settings button, and the command palette expose unresolved conflicts.
+- **Human-reviewed conflicts:** for genuinely conflicting files, keep the local original and remote snapshot, persist a pending record, and pause that file until the user merges and confirms.
 - **File safety:** existing atomic desktop replacement, verified backups, crash-recovery journals, serialized state checkpoints, and full/incremental sync isolation remain in place.
 - **Optional encryption:** AES-256-GCM encryption and password-protected configuration transfer between devices.
 
@@ -58,7 +60,13 @@ configuration transfer uses the clipboard only when requested.
 
 ## 中文
 
-使用百度网盘同步 Obsidian 知识库，支持 **Obsidian 1.14.4 及以上桌面端、Android 和 iOS**；手机默认手动同步，并显示持续更新的进度提示。iOS 已通过模拟环境检查，尚未完成真机验证。详见 [手机安装说明](MOBILE-INSTALL.zh-CN.md)。
+使用百度网盘同步 Obsidian 知识库，支持 **Obsidian 1.14.4 及以上桌面端、Android 和 iOS**；手机默认手动同步，并显示持续更新的进度提示。详见 [手机安装说明](MOBILE-INSTALL.zh-CN.md) 与 [更新日志及排查解决指南](CHANGELOG.md)。
+
+- **大文件防闪退分片拉取**：大文件（PDF/音视频等）采用 HTTP Range 4MB 分片流式拉取，避免触发安卓 Capacitor Base64 内存暴涨（256MB ART 限制），保障手机平稳不闪退。
+- **相同内容冲突自动消解**：两端内容哈希（MD5）一致时自动标记解决，更新基线并自动清理冗余 `.conflict` 副本。
+- **独立并发控制**：设置中支持分别配置「上传并发数」与「下载并发数」（1~3），兼顾传输速度与稳定性。
+- **排队防覆盖安全检查**：下载落盘前复核本地内容哈希，若排队期间本地被编辑则自动升级为冲突保护，绝不静默覆盖最新笔记。
+- **两阶段原子落盘**：`AtomicFileSystem` 事务文件保障断网不丢笔记、不损坏文件。
 
 ### 安装
 
