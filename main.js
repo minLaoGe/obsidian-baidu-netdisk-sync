@@ -131,12 +131,12 @@ ${counts}`);
     }
     if (state.busy) {
       content.createEl("p", {
-        text: "\u26A0\uFE0F \u63D0\u793A\uFF1A\u540C\u6B65\u671F\u95F4\u8BF7\u4FDD\u6301\u624B\u673A\u5728\u524D\u53F0\u4EAE\u5C4F\uFF0C\u5207\u52FF\u606F\u5C4F\u6216\u5207\u6362\u540E\u53F0\uFF08Android \u4F11\u7720\u4F1A\u5207\u65AD\u7F51\u7EDC\u5BFC\u81F4 UnknownHostException \u9519\u8BEF\uFF09\u3002",
+        text: import_obsidian.Platform.isMobile ? "\u26A0\uFE0F \u63D0\u793A\uFF1A\u540C\u6B65\u671F\u95F4\u8BF7\u4FDD\u6301\u624B\u673A\u5728\u524D\u53F0\u4EAE\u5C4F\uFF0C\u5207\u52FF\u606F\u5C4F\u6216\u5207\u6362\u540E\u53F0\uFF08Android \u4F11\u7720\u4F1A\u5207\u65AD\u7F51\u7EDC\u5BFC\u81F4 UnknownHostException \u9519\u8BEF\uFF09\u3002" : "\u{1F4A1} \u63D0\u793A\uFF1A\u6B63\u5728\u4E0E\u767E\u5EA6\u7F51\u76D8\u8FDB\u884C\u5B89\u5168\u53CC\u5411\u540C\u6B65\uFF0C\u4FDD\u6301\u7F51\u7EDC\u7545\u901A\u5373\u53EF\u3002\u53EF\u6536\u8D77\u5F39\u7A97\uFF0C\u6D6E\u52A8\u5361\u7247\u5C06\u7EE7\u7EED\u5C55\u793A\u8FDB\u5EA6\u3002",
         cls: "setting-item-description"
       });
     } else {
       content.createEl("p", {
-        text: "\u{1F4A1} \u63D0\u793A\uFF1A\u82E5\u540C\u6B65\u63D0\u793A\u7F51\u7EDC\u9519\u8BEF\u6216\u57DF\u540D\u89E3\u6790\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u624B\u673A\u7F51\u7EDC\u8FDE\u63A5\u3001\u5173\u95ED\u79D1\u5B66\u4E0A\u7F51\u4EE3\u7406\u6216\u7CFB\u7EDF\u201C\u4E13\u7528 DNS\u201D\u540E\u4FDD\u6301\u4EAE\u5C4F\u91CD\u8BD5\u3002",
+        text: import_obsidian.Platform.isMobile ? "\u{1F4A1} \u63D0\u793A\uFF1A\u82E5\u540C\u6B65\u63D0\u793A\u7F51\u7EDC\u9519\u8BEF\u6216\u57DF\u540D\u89E3\u6790\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u624B\u673A\u7F51\u7EDC\u8FDE\u63A5\u3001\u5173\u95ED\u79D1\u5B66\u4E0A\u7F51\u4EE3\u7406\u6216\u7CFB\u7EDF\u201C\u4E13\u7528 DNS\u201D\u540E\u4FDD\u6301\u4EAE\u5C4F\u91CD\u8BD5\u3002" : "\u{1F4A1} \u63D0\u793A\uFF1A\u672C\u8F6E\u540C\u6B65\u5DF2\u7ED3\u675F\u3002\u82E5\u9047\u7F51\u7EDC\u5F02\u5E38\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u8FDE\u63A5\u6216\u767E\u5EA6\u7F51\u76D8\u6388\u6743\u72B6\u6001\u3002",
         cls: "setting-item-description"
       });
     }
@@ -3301,7 +3301,7 @@ var BaiduNetdiskSyncPlugin = class extends import_obsidian7.Plugin {
         this.updateStatusBar(statusText, isBusy);
       }
     );
-    if (import_obsidian7.Platform.isMobile) this.mobileProgress = this.addChild(new MobileSyncProgress(this));
+    this.mobileProgress = this.addChild(new MobileSyncProgress(this));
     this.addCommand({ id: "show-baidu-sync-progress", name: "\u67E5\u770B\u767E\u5EA6\u540C\u6B65\u8FDB\u5EA6", callback: () => this.openSyncProgress() });
     await this.syncEngine.initialize();
     this.updateStatusBar(this.settings.syncPaused ? "\u5DF2\u6682\u505C" : "\u5C31\u7EEA", false);
@@ -3379,7 +3379,7 @@ var BaiduNetdiskSyncPlugin = class extends import_obsidian7.Plugin {
     }
   }
   updateStatusBar(status, isBusy) {
-    if (import_obsidian7.Platform.isMobile) this.mobileProgress?.update();
+    this.mobileProgress?.update();
     if (!this.statusBarItem) return;
     const icon = isBusy ? "\u23F3 " : "\u2601\uFE0F ";
     const pending = this.syncEngine?.getPendingConflicts().length || 0;
@@ -3387,7 +3387,10 @@ var BaiduNetdiskSyncPlugin = class extends import_obsidian7.Plugin {
     this.statusBarItem.title = "\u70B9\u51FB\u6267\u884C\u767E\u5EA6\u7F51\u76D8\u540C\u6B65";
     this.statusBarItem.onclick = () => {
       if (this.syncEngine.getPendingConflicts().length) this.openConflictReview();
-      else this.runSync();
+      else {
+        this.openSyncProgress();
+        this.runSync();
+      }
     };
   }
   openSyncProgress() {
@@ -3405,7 +3408,7 @@ var BaiduNetdiskSyncPlugin = class extends import_obsidian7.Plugin {
       new import_obsidian7.Notice("\u8BF7\u5148\u5728\u8BBE\u7F6E\u4E2D\u914D\u7F6E\u767E\u5EA6\u7F51\u76D8 Access Token\uFF01");
       return;
     }
-    if (import_obsidian7.Platform.isMobile) this.openSyncProgress();
+    this.openSyncProgress();
     if (this.manualSync) return this.manualSync;
     const task = this.syncEngine.runFullSync(forceFull).then(() => {
     });

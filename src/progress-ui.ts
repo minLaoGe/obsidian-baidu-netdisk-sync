@@ -1,4 +1,4 @@
-import { Component, Modal, setIcon } from 'obsidian';
+import { Component, Modal, Platform, setIcon } from 'obsidian';
 import type BaiduNetdiskSyncPlugin from './main';
 
 /** Visible mobile feedback independent of Obsidian's desktop-only status bar. */
@@ -69,12 +69,16 @@ export class MobileSyncProgress extends Component {
     }
     if (state.busy) {
       content.createEl('p', {
-        text: '⚠️ 提示：同步期间请保持手机在前台亮屏，切勿息屏或切换后台（Android 休眠会切断网络导致 UnknownHostException 错误）。',
+        text: Platform.isMobile
+          ? '⚠️ 提示：同步期间请保持手机在前台亮屏，切勿息屏或切换后台（Android 休眠会切断网络导致 UnknownHostException 错误）。'
+          : '💡 提示：正在与百度网盘进行安全双向同步，保持网络畅通即可。可收起弹窗，浮动卡片将继续展示进度。',
         cls: 'setting-item-description'
       });
     } else {
       content.createEl('p', {
-        text: '💡 提示：若同步提示网络错误或域名解析失败，请检查手机网络连接、关闭科学上网代理或系统“专用 DNS”后保持亮屏重试。',
+        text: Platform.isMobile
+          ? '💡 提示：若同步提示网络错误或域名解析失败，请检查手机网络连接、关闭科学上网代理或系统“专用 DNS”后保持亮屏重试。'
+          : '💡 提示：本轮同步已结束。若遇网络异常，请检查网络连接或百度网盘授权状态。',
         cls: 'setting-item-description'
       });
     }

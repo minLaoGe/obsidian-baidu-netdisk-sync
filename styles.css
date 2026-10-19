@@ -66,7 +66,9 @@
 .baidu-merge-added { background: rgba(40,180,90,.15); }
 .baidu-merge-editor { width: 100%; min-height: 32vh; font-family: var(--font-monospace); white-space: pre; }
 
-.baidu-sync-mobile-progress { position: fixed; z-index: 10000; left: 12px; right: 12px; bottom: calc(64px + env(safe-area-inset-bottom, 0px)); padding: 10px 12px; background: var(--background-primary); border: 1px solid var(--background-modifier-border); border-radius: 12px; color: var(--text-normal); box-shadow: 0 4px 18px #0003; }
+.baidu-sync-mobile-progress { position: fixed; z-index: 10000; padding: 12px 14px; background: var(--background-primary); border: 1px solid var(--background-modifier-border); border-radius: 12px; color: var(--text-normal); box-shadow: 0 4px 18px rgba(0, 0, 0, 0.25); }
+.is-mobile .baidu-sync-mobile-progress { left: 12px; right: 12px; bottom: calc(64px + env(safe-area-inset-bottom, 0px)); }
+body:not(.is-mobile) .baidu-sync-mobile-progress { right: 24px; bottom: 36px; width: 380px; max-width: calc(100vw - 48px); }
 .baidu-sync-progress-header { display: flex; align-items: center; gap: 8px; }
 .baidu-sync-progress-open { flex: 1; text-align: left; white-space: normal; padding: 2px 0; height: auto; border: none; box-shadow: none; background: transparent; font-weight: 600; }
 .baidu-sync-mobile-progress progress, .baidu-sync-progress-bar { display: block; width: 100%; height: 8px; margin: 8px 0; accent-color: var(--interactive-accent); }

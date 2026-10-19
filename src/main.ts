@@ -49,7 +49,7 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
       }
     );
 
-    if (Platform.isMobile) this.mobileProgress = this.addChild(new MobileSyncProgress(this));
+    this.mobileProgress = this.addChild(new MobileSyncProgress(this));
     this.addCommand({ id: 'show-baidu-sync-progress', name: '查看百度同步进度', callback: () => this.openSyncProgress() });
     await this.syncEngine.initialize();
     this.updateStatusBar(this.settings.syncPaused ? "已暂停" : "就绪", false);
@@ -144,7 +144,7 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
   }
 
   public updateStatusBar(status: string, isBusy: boolean) {
-    if (Platform.isMobile) this.mobileProgress?.update();
+    this.mobileProgress?.update();
     if (!this.statusBarItem) return;
     const icon = isBusy ? "⏳ " : "☁️ ";
     const pending = this.syncEngine?.getPendingConflicts().length || 0;
@@ -152,7 +152,10 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
     this.statusBarItem.title = "点击执行百度网盘同步";
     this.statusBarItem.onclick = () => {
       if (this.syncEngine.getPendingConflicts().length) this.openConflictReview();
-      else this.runSync();
+      else {
+        this.openSyncProgress();
+        this.runSync();
+      }
     };
   }
 
@@ -166,7 +169,7 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
       new Notice("请先在设置中配置百度网盘 Access Token！");
       return;
     }
-    if (Platform.isMobile) this.openSyncProgress();
+    this.openSyncProgress();
     if (this.manualSync) return this.manualSync;
     const task = this.syncEngine.runFullSync(forceFull).then(() => {}); this.manualSync = task;
     try { await task; } finally { if (this.manualSync === task) this.manualSync = undefined; this.mobileProgress?.update(); }
