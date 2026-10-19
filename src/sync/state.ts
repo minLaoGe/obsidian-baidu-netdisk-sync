@@ -1,6 +1,6 @@
 import { App } from "obsidian";
 import { AtomicFileSystem } from "../utils/atomic";
-import { SyncMetadataEntry, SyncStateData } from "../types";
+import { PendingConflict, SyncMetadataEntry, SyncStateData } from "../types";
 
 /**
  * Manages the persistent synchronization state database with atomic write semantics.
@@ -33,6 +33,7 @@ export class SyncStateStore {
             version: parsed.version || 1,
             lastFullSyncTimestamp: parsed.lastFullSyncTimestamp || 0,
             files: parsed.files || {},
+            conflicts: parsed.conflicts || {},
           };
         } else {
           throw new Error("Invalid sync state");
@@ -42,6 +43,15 @@ export class SyncStateStore {
       throw new Error(`同步基线加载失败，已停止同步以保护现有文件: ${String(err)}`);
     }
     this.isDirty = false;
+  }
+
+  getConflicts(): PendingConflict[] { return Object.values(this.data.conflicts || {}); }
+  setConflict(record: PendingConflict): void {
+    (this.data.conflicts ||= {})[record.path] = record;
+    this.isDirty = true;
+  }
+  clearConflict(path: string): void {
+    if (this.data.conflicts?.[path]) { delete this.data.conflicts[path]; this.isDirty = true; }
   }
 
   /**

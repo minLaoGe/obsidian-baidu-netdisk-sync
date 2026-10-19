@@ -13,6 +13,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   username: "",
   remoteBasePath: "/apps/obsidian-vault",
   autoSync: false,
+  uploadConcurrency: 3,
   syncIntervalMinutes: 15,
   syncOnStartup: true,
   syncOnModifyDebounceSeconds: 3,
@@ -316,6 +317,18 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("上传并发数")
+      .setDesc("全量同步同时上传 1–3 个不同文件；单文件提交、下载、冲突处理和本地原子写入仍保持顺序。")
+      .addDropdown((dropdown) =>
+        dropdown.addOptions({ "1": "1（串行）", "2": "2", "3": "3（推荐）" })
+          .setValue(String(this.plugin.settings.uploadConcurrency || 3))
+          .onChange(async (value) => {
+            this.plugin.settings.uploadConcurrency = Number(value);
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
       .setName("自动同步间隔 (分钟)")
       .setDesc("每隔多少分钟自动执行一次后台同步比对")
       .addText((text) =>
@@ -352,20 +365,10 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("5. 冲突与数据保护策略 (Conflict Resolution)").setHeading();
 
     new Setting(containerEl)
-      .setName("冲突解决策略")
-      .setDesc("当本地与网盘同时修改产生分歧时的裁决机制")
-      .addDropdown((drop) =>
-        drop
-          .addOption("create_conflict_file", "安全分支副本 (推荐：零数据丢失，保留本地并生成冲突文件)")
-          .addOption("keep_newer", "以较新修改时间为准 (Last-Write-Wins)")
-          .addOption("keep_local", "强制以本地为准 (覆盖远端)")
-          .addOption("keep_remote", "强制以远端为准 (覆盖本地)")
-          .setValue(this.plugin.settings.conflictStrategy)
-          .onChange(async (val) => {
-            this.plugin.settings.conflictStrategy = val as ConflictStrategy;
-            await this.plugin.saveSettings();
-          })
-      );
+      .setName("冲突交由人工解决")
+      .setDesc("保留本地原文件和网盘副本；暂停冲突文件同步，确认已解决后才提交，不再按时间或来源自动覆盖。")
+      .addButton(b => b.setButtonText(`查看待处理冲突 (${this.plugin.syncEngine.getPendingConflicts().length})`)
+        .onClick(() => this.plugin.openConflictReview()));
 
     new Setting(containerEl)
       .setName("同步 .obsidian 配置目录")
@@ -421,7 +424,7 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("全量双向同步")
-      .setDesc("立即按严格时间顺序和原子检查机制执行比对与同步")
+      .setDesc("有限并发上传不同文件，并保留单文件提交顺序、冲突保护与原子写入")
       .addButton((btn) =>
         btn
           .setButtonText("立即同步")

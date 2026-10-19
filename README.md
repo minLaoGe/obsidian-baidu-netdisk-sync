@@ -2,35 +2,92 @@
 
 ## English
 
-Baidu Sync Safe synchronizes an Obsidian vault with Baidu Netdisk. It supports manual and scheduled bidirectional sync, conflict copies, optional AES-256-GCM end-to-end encryption, and encrypted configuration transfer between devices.
+A desktop Obsidian plugin for bidirectional sync with Baidu Netdisk. Requires
+**Obsidian 1.14.4+**, a Baidu Netdisk account, and a Baidu developer application.
 
-**Requirements:** Obsidian 1.14.4 or later, a Baidu Netdisk account, and a personal Baidu developer application with AppKey/AppSecret.
+- **Bounded uploads:** full sync uploads 1–3 independent files concurrently (default 3). Each file retains ordered precreate, missing-block upload, and final commit.
+- **Delta sync:** unchanged files are skipped. Identical-content local save events make no Baidu request. Full sync still checks the remote inventory for edits on other devices.
+- **Human-reviewed conflicts:** keep the local original and remote snapshot, persist a pending record, and pause that file until the user merges and confirms. Notices, a status-bar count, a settings button, and the command palette expose unresolved conflicts.
+- **File safety:** existing atomic desktop replacement, verified backups, crash-recovery journals, serialized state checkpoints, and full/incremental sync isolation remain in place.
+- **Optional encryption:** AES-256-GCM encryption and password-protected configuration transfer between desktop devices.
 
-**Install:** Download `main.js`, `manifest.json`, and `styles.css` from this repository's [latest release](https://github.com/minLaoGe/obsidian-baidu-netdisk-sync/releases/latest). Place them in `<vault>/.obsidian/plugins/baidu-sync/` and enable **Baidu Sync Safe** under Community plugins. Alternatively, install via BRAT with repository path `minLaoGe/obsidian-baidu-netdisk-sync`.
+### Installation
 
-**Set up:** Create an application in the Baidu Netdisk developer console, enter its AppKey and AppSecret in plugin settings, open the authorization page, exchange the authorization code for a token, and test connectivity. Choose a remote directory before starting sync. To enable encryption, set a nonempty encryption password on every device. Keep an independent backup before the first sync.
+Download `main.js`, `manifest.json`, and `styles.css` from the repository's
+[latest release](https://github.com/minLaoGe/obsidian-baidu-netdisk-sync/releases/latest)
+and place them in `<vault>/.obsidian/plugins/baidu-sync/`. Alternatively install with
+BRAT using `minLaoGe/obsidian-baidu-netdisk-sync`. Enable **Baidu Sync Safe** in
+Community plugins. To use unreleased source changes, build the checked-out branch
+and copy those three files to the same directory. This version is desktop-only.
 
-**File safety:** Desktop replacement uses native filesystem rename with verified backup and journal files and pre-commit fsync. Mobile replacement uses a journaled transaction log to ensure safe restart recovery. Startup recovery only processes plugin-owned journal entries. The plugin makes requests to Baidu for authorization, uploads and downloads, and uses the clipboard for user-triggered configuration transfer.
+Enter your AppKey and AppSecret in plugin settings, authorize with Baidu, exchange
+the code for a token, test connectivity, and choose the remote directory. Make an
+independent backup before first sync. When enabling encryption, configure the same
+nonempty password on every device.
 
-**Credits:** The link to owl234's project in the Chinese acknowledgements below is intentional attribution for encryption and configuration-sharing design references; installation and downloads for this plugin use the minLaoGe repository linked above.
+### Manual conflict resolution
+
+1. Open pending conflicts from the status bar, settings, or **查看并人工解决同步冲突** command.
+2. Compare the original with its `.conflict-...` remote snapshot; merge the chosen content into the original.
+3. Click **确认已解决并提交**. If the original is absent, this explicitly applies its deletion remotely.
+
+The remote is checked again before committing. New remote edits refresh the pending
+snapshot and block stale confirmation. **更新远端副本** repairs a missing snapshot
+or fetches a newer version. Other files keep syncing. Pending records survive restart;
+conflict copies stay local and remain available after resolution. Older automatic
+winner preferences are no longer applied. Legacy copies are preserved but are not
+automatically converted into pending records with an invented remote baseline.
+
+### Correctness and performance
+
+The upload protocol now handles `return_type=1` as missing blocks and `return_type=2`
+as rapid upload, fixing skipped-block error `31500`. Multipart requests let
+Obsidian/Electron calculate Content-Length, fixing `ERR_INVALID_ARGUMENT`.
+
+A four-round synthetic Baidu test measured about **2.97×** mean upload speedup with
+three workers. All 36 files and an additional multi-part file passed downloaded
+byte-for-byte verification. Actual vault speed varies; see [performance evidence](docs/PERFORMANCE.md).
+
+Atomicity is per file, not a transaction spanning the entire vault, cloud service,
+or simultaneous devices. Conflict review is a file workflow, not Git integration or
+automatic text merging. Full scans retain content hashing rather than trusting only
+mtime and size. The plugin contacts Baidu for authorization and file operations;
+configuration transfer uses the clipboard only when requested.
 
 ---
 
 ## 中文
 
-为 Obsidian 打造的高可靠百度网盘双向同步插件。依托百度网盘大容量云存储，提供**单设备串行执行**、**双模式文件替换与事务恢复**、**3-Way 冲突副本保护**，并支持**端到端零知识加密（E2EE）**与**多设备一键跨端快速配对**机制。
+使用百度网盘同步 Obsidian 知识库，当前仅支持 **Obsidian 1.14.4 及以上桌面端**。
 
----
+### 新增功能与修复
 
-## 🌟 致谢
+| 功能 | 行为 |
+| --- | --- |
+| 1–3 并发上传 | 默认 3 个不同文件并发；同一文件的分片和最终提交保持顺序 |
+| 差异同步 | 内容未变不上传、不下载；重复保存不请求百度接口 |
+| 减少无效操作 | 整轮无变化时不重复创建根目录、不重写同步基线；仍检查远端列表 |
+| 人工冲突处理 | 保留双方版本、持久化待办、暂停冲突文件，不自动选择覆盖方 |
+| 明确冲突提示 | 弹出提示、状态栏待处理数量、设置入口、命令面板入口 |
+| 原子性保护 | 分片失败不提交；成功后原子保存基线；保存失败时停止派发并等待在途任务结束 |
+| 上传协议修复 | 修正秒传判断，解决 `31500`；移除受限制请求头，解决桌面端 `ERR_INVALID_ARGUMENT` |
 
-特别感谢社区优秀开源项目 [owl234/obsidian-baidu-netdisk-sync](https://github.com/owl234/obsidian-baidu-netdisk-sync) 在端到端加密（E2EE）与多设备跨端配对设计上带来的启发与技术参考。
+首次上传仍需传完所有待同步文件，后续才可根据基线跳过未修改内容。
+自动本地修改任务保持顺序；上传并发针对全量同步中的独立文件。下载、删除、
+冲突处理和本地原子替换保持串行。令牌刷新也串行处理。
 
----
+### 安装
+
+从本仓库 [Releases](https://github.com/minLaoGe/obsidian-baidu-netdisk-sync/releases/latest)
+下载 `main.js`、`manifest.json`、`styles.css`，放入
+`<知识库>/.obsidian/plugins/baidu-sync/`，然后在第三方插件中启用 **Baidu Sync Safe**。
+也可以通过 BRAT 添加 `minLaoGe/obsidian-baidu-netdisk-sync`。
+未发布的分支代码需要先本地构建再复制三个文件。更新前保留旧插件文件，
+并等待当前同步完成后再重新加载插件；已有 `data.json` 和同步基线不要删除。
 
 ## 📖 百度网盘账号授权（OAuth 2.0）保姆级获取步骤
 
-只需在电脑端首次操作一次，后续手机或其它设备可直接通过加密配对码一键导入！
+只需在电脑端首次操作一次，后续手机或其他桌面设备可直接通过加密配对码一键导入！
 
 ### 第一步：登录百度网盘开放平台
 1. 浏览器打开 [百度网盘开放平台控制台](https://pan.baidu.com/union/console/applist)；
@@ -62,7 +119,7 @@ Baidu Sync Safe synchronizes an Obsidian vault with Baidu Netdisk. It supports m
 
 ## 📱 多设备快速配对指南（电脑 → 手机 / 其它电脑）
 
-主设备配置完成后，其它设备无需再繁琐地申请开发者和扫码，可通过加密配对码一键同步配置：
+主设备配置完成后，其他桌面设备无需再繁琐地申请开发者和扫码，可通过加密配对码一键同步配置：
 
 1. **在主设备（电脑端）**：
    - 进入插件设置 → 找到「多设备快速配对与配置迁移」；
@@ -75,83 +132,52 @@ Baidu Sync Safe synchronizes an Obsidian vault with Baidu Netdisk. It supports m
 
 ---
 
-## 🛠️ 安装与使用
 
-在插件通过 Obsidian 官方社区商店审核之前，你可以选择以下任一方式进行安装：
+### 人工解决冲突
 
-### 方法一：使用 BRAT 插件自动安装（推荐，全平台通用）
-BRAT（Obsidian42 - BRAT）是官方社区认可的测试插件管理器，支持自动拉取与后续一键更新：
-1. 在 Obsidian 打开「设置」 → 「第三方插件」 → 「社区插件市场」；
-2. 搜索并安装 **`BRAT`** 插件（全名 `Obsidian42 - BRAT`），安装后启用；
-3. 进入 BRAT 插件设置，点击 **`Add Beta plugin`**；
-4. 在输入框中填入本仓库地址：
-   ```text
-   minLaoGe/obsidian-baidu-netdisk-sync
-   ```
-5. 点击 `Add Plugin`，BRAT 将自动下载最新版本文件并安装就绪；
-6. 返回「第三方插件」列表，启用 **Baidu Sync Safe** 即可。
+1. 出现提示后，点击状态栏的“待处理冲突”，或在设置/命令面板打开冲突列表。
+2. 打开本地原文件与远端副本，人工比较，把最终内容合并到原文件。
+3. 点击“确认已解决并提交”。**若原文件不存在，确认会将删除同步到网盘。**
+4. 远端再次变化时会阻止旧确认，更新副本后请重新检查；缺失副本可通过“更新远端副本”补取。
 
-### 方法二：手动安装（桌面端）
-1. 打开你的 Obsidian 知识库根目录，进入 `.obsidian/plugins/` 目录；
-2. 新建名为 `baidu-sync` 的文件夹；
-3. 将构建发布的 `main.js`、`manifest.json`、`styles.css` 这 3 个文件放入该文件夹；
-4. 在 Obsidian「设置」 → 「第三方插件」中点击刷新，并启用 **Baidu Sync Safe**。
+未确认前不推进该文件的同步基线，不上传冲突副本；其他文件正常同步。待办在重启后仍保留，
+解决后的副本也保留供追溯。旧版自动生成的副本不会删除，但不会凭空补造它们的待办基线。
+这是类似 Git 的人工处理流程，不包含 Git 集成或自动文本合并。
 
-### 方法三：手动安装（移动端 iOS / Android）
-1. 准备好 `main.js`、`manifest.json`、`styles.css` 3 个文件，发送至手机；
-2. 将文件移动至手机端知识库的插件目录：
-   - **Android**：使用手机文件管理（或 MT 管理器），进入 `你的知识库/.obsidian/plugins/`，新建 `baidu-sync` 文件夹并将 3 个文件放入（若未显示 `.obsidian`，请在文件管理器设置中开启“显示隐藏文件”）。
-   - **iOS / iPadOS**：打开系统自带「文件」App →「我的 iPhone」→「Obsidian」→ 进入你的知识库目录；点击右上角 `...` 选择「显示所有隐藏文件」，进入 `.obsidian/plugins/`，新建 `baidu-sync` 文件夹并将 3 个文件拷贝进去。
-3. 打开手机端 Obsidian「设置」 → 「第三方插件」 → 点击刷新并启用插件。
+### 验证与边界
 
----
+生产构建、TypeScript 检查、104 项可靠性断言及并发、差异同步、上传协议测试通过。
+覆盖崩溃恢复、磁盘故障、待处理冲突重启恢复、远端再次修改、缺失副本重建、
+失败上传不提交、成功提交后再更新状态等场景。
 
-## 🚀 核心架构与功能特性
+[测速记录](docs/PERFORMANCE.md) 中的小文件对照实验平均约快 3 倍，
+不保证所有文件或整个知识库都达到相同比例。
+原子性针对单个文件提交与可恢复本地替换，不是整库或多设备之间的分布式事务。
+端到端加密可选；首次同步前请保留独立备份。
 
-### 1. 严格时间顺序（Ordering Guarantee）
-- **本地防抖缓冲池（Debounce Manager）**：在 Obsidian 中高频键入或自动保存时，通过可配置窗口（默认 3 秒）将多次修改合并为单次有效变更，杜绝打字期间高频发包引起的网络倒序与网盘接口频控。
-- **严格 FIFO 串行异步执行队列**：确保对于任何文件与元数据，始终按产生的逻辑时间序列单调推进，消除并发交错。
-- **全局同步互斥锁（Sync Mutex Lock）**：全量比对期间独占锁，防止手动连续点击或定时轮询与正在运行的增量任务重叠。
+## 本地开发
 
-### 2. 双模式安全写入与崩溃事务恢复
-- **桌面端（原生原子覆盖）**：在桌面端利用底层文件系统 `rename` 一步到位原子替换目标文件，彻底消除“先删旧文件、再改名新文件”之间的丢失空档；并在写入后显式调用 `fsync` 确保数据落盘。
-- **移动端（事务预写日志 WAL）**：针对移动端没有原生原子覆盖接口的情况，在 `.obsidian/plugins/baidu-sync/transactions/` 目录下保留 `.new`、`.old` 与校验日志。若在操作中途遭遇断电或闪退，启动时恢复引擎会自动校验 MD5 并无损还原，确保笔记完好无损。
-- **容灾恢复与数据校验**：所有文件替换与下载均经过哈希重读验证；同步基线（`sync-state.json`）同样采用事务机制保存，基线损坏不会静默覆盖，保障数据确定性。
-
-### 3. 三方差异冲突防护（3-Way Conflict-Safe Resolution）
-基于「当前本地」、「当前网盘」、「上次成功同步基准（Base Snapshot）」进行三方对比：
-- **本地修改，远端未变**：自动推送（Upload）。
-- **远端修改，本地未变**：自动拉取（Download）。
-- **两端并发修改且哈希不同（真实冲突）**：
-  - **默认策略（安全分支副本）**：保留本地编辑内容原封不动，将远端冲突版本拉取并另存为 `${文件名}.conflict-${时间戳}.${扩展名}`，并在 Obsidian 界面弹出 Notice 提示，同时收敛基线，保留两个版本供用户检查与合并。
-  - **可选策略**：支持在设置中切换为“以最新时间戳为准（keep_newer）”、“强制本地优先”或“强制远端优先”。
-- **修改与删除冲突**：无论发生“本地修改 vs 远端删除”还是“本地删除 vs 远端修改”，均严格遵循“以修改方优先”原则保留数据，杜绝误删风险。
-
-### 4. 工业级端到端加密（E2EE）
-- 采用 Web Crypto API 原生实现的 **AES-256-GCM** 高级加密标准 + **PBKDF2**（600,000 次 SHA-256 哈希迭代）派生高强度密钥。
-- 文件在离开本地设备前完成加密，网盘端仅存放密文，兼顾大容量同步与笔记隐私保护。
-- 零 Node.js 内置依赖，纯原生跨平台，全平台环境均可顺畅运行。
-
----
-
-## 💻 本地构建开发
+使用 Node.js 22 LTS：
 
 ```bash
-# 安装依赖
-npm install
-
-# 生产环境编译打包
-npm run build
-
-# 执行可靠性回归测试
+npm ci
+npm run typecheck
 npm test
-
-# 开发监听模式
-npm run dev
+npm run build
 ```
 
----
+可选实测（会创建仅含随机测试内容的临时网盘目录，下载校验后删除，不改笔记或同步基线）：
 
-## 📄 开源许可证
+```bash
+node tests/benchmark-live.cjs /absolute/path/to/plugin/data.json
+node tests/benchmark-live.cjs /absolute/path/to/plugin/data.json --large-only
+```
 
-本项目基于 [MIT License](LICENSE) 开源。
+不要将真实的插件 `data.json`、Access Token、AppSecret 或同步基线上传到代码仓库。
+
+## 致谢与许可证
+
+感谢 [owl234/obsidian-baidu-netdisk-sync](https://github.com/owl234/obsidian-baidu-netdisk-sync)
+对端到端加密与配置迁移设计提供的参考。本插件安装地址为上方 minLaoGe 仓库。
+
+[MIT License](LICENSE)。

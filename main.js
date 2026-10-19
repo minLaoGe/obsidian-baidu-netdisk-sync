@@ -27,10 +27,133 @@ __export(main_exports, {
   default: () => BaiduNetdiskSyncPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian5 = require("obsidian");
+var import_obsidian6 = require("obsidian");
 
 // src/api/baidu-client.ts
 var import_obsidian = require("obsidian");
+
+// src/sync/queue.ts
+var Mutex = class {
+  constructor() {
+    this.current = Promise.resolve();
+  }
+  async acquire(task) {
+    let release;
+    const next = new Promise((resolve) => {
+      release = resolve;
+    });
+    const previous = this.current;
+    this.current = next;
+    await previous;
+    try {
+      return await task();
+    } finally {
+      release();
+    }
+  }
+  isLocked() {
+    let locked = true;
+    Promise.race([
+      this.current.then(() => false),
+      Promise.resolve(true)
+    ]).then((val) => {
+      locked = val;
+    });
+    return locked;
+  }
+};
+var FifoQueue = class {
+  constructor() {
+    this.queue = [];
+    this.isProcessing = false;
+  }
+  /**
+   * Enqueue a task to be executed strictly in FIFO order.
+   */
+  enqueue(task) {
+    return new Promise((resolve, reject) => {
+      this.queue.push(async () => {
+        try {
+          const result = await task();
+          resolve(result);
+        } catch (err) {
+          reject(err);
+        }
+      });
+      this.processNext();
+    });
+  }
+  async processNext() {
+    if (this.isProcessing) return;
+    if (this.queue.length === 0) return;
+    this.isProcessing = true;
+    const task = this.queue.shift();
+    if (task) {
+      try {
+        await task();
+      } catch (err) {
+        console.error("Queue task execution error:", err);
+      } finally {
+        this.isProcessing = false;
+        this.processNext();
+      }
+    } else {
+      this.isProcessing = false;
+    }
+  }
+  get length() {
+    return this.queue.length;
+  }
+  clear() {
+    this.queue = [];
+  }
+};
+var DebounceManager = class {
+  constructor() {
+    this.timers = /* @__PURE__ */ new Map();
+  }
+  debounce(key, delayMs, fn) {
+    if (this.timers.has(key)) {
+      window.clearTimeout(this.timers.get(key));
+    }
+    const timer = window.setTimeout(() => {
+      this.timers.delete(key);
+      fn();
+    }, delayMs);
+    this.timers.set(key, timer);
+  }
+  cancel(key) {
+    if (this.timers.has(key)) {
+      window.clearTimeout(this.timers.get(key));
+      this.timers.delete(key);
+    }
+  }
+  clearAll() {
+    for (const timer of this.timers.values()) {
+      window.clearTimeout(timer);
+    }
+    this.timers.clear();
+  }
+};
+async function runBounded(items, concurrency, work) {
+  let cursor = 0;
+  let failed = false;
+  let failure;
+  const worker = async () => {
+    while (!failed && cursor < items.length) {
+      const item = items[cursor++];
+      try {
+        await work(item);
+      } catch (error) {
+        if (!failed) failure = error;
+        failed = true;
+      }
+    }
+  };
+  const limit = Number.isFinite(concurrency) ? Math.max(1, Math.min(3, Math.floor(concurrency))) : 1;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  if (failed) throw failure;
+}
 
 // src/utils/crypto.ts
 var BAIDU_CHUNK_SIZE = 4 * 1024 * 1024;
@@ -183,6 +306,7 @@ function calculateBlockList(buffer) {
 // src/api/baidu-client.ts
 var BaiduClient = class {
   constructor(options) {
+    this.tokenMutex = new Mutex();
     this.appKey = options.appKey;
     this.secretKey = options.secretKey;
     this.accessToken = options.accessToken;
@@ -244,43 +368,45 @@ var BaiduClient = class {
    * Refresh access token before expiration
    */
   async ensureFreshToken() {
-    const now = Date.now();
-    if (this.refreshToken && this.tokenExpiresAt && this.tokenExpiresAt - now < 3e5) {
-      try {
-        const url = "https://openapi.baidu.com/oauth/2.0/token";
-        const body = new URLSearchParams({
-          grant_type: "refresh_token",
-          refresh_token: this.refreshToken,
-          client_id: this.appKey,
-          client_secret: this.secretKey
-        });
-        const res = await (0, import_obsidian.requestUrl)({
-          url,
-          method: "POST",
-          headers: {
-            "Content-Type": "application/x-www-form-urlencoded"
-          },
-          body: body.toString()
-        });
-        const data = res.json;
-        if (!data.error && data.access_token) {
-          this.accessToken = data.access_token;
-          this.refreshToken = data.refresh_token || this.refreshToken;
-          this.tokenExpiresAt = Date.now() + (data.expires_in || 2592e3) * 1e3;
-          if (this.onTokenRefreshed) {
-            await this.onTokenRefreshed({
-              access_token: this.accessToken,
-              refresh_token: this.refreshToken,
-              expires_in: data.expires_in || 2592e3,
-              scope: data.scope || ""
-            });
+    return this.tokenMutex.acquire(async () => {
+      const now = Date.now();
+      if (this.refreshToken && this.tokenExpiresAt && this.tokenExpiresAt - now < 3e5) {
+        try {
+          const url = "https://openapi.baidu.com/oauth/2.0/token";
+          const body = new URLSearchParams({
+            grant_type: "refresh_token",
+            refresh_token: this.refreshToken,
+            client_id: this.appKey,
+            client_secret: this.secretKey
+          });
+          const res = await (0, import_obsidian.requestUrl)({
+            url,
+            method: "POST",
+            headers: {
+              "Content-Type": "application/x-www-form-urlencoded"
+            },
+            body: body.toString()
+          });
+          const data = res.json;
+          if (!data.error && data.access_token) {
+            this.accessToken = data.access_token;
+            this.refreshToken = data.refresh_token || this.refreshToken;
+            this.tokenExpiresAt = Date.now() + (data.expires_in || 2592e3) * 1e3;
+            if (this.onTokenRefreshed) {
+              await this.onTokenRefreshed({
+                access_token: this.accessToken,
+                refresh_token: this.refreshToken,
+                expires_in: data.expires_in || 2592e3,
+                scope: data.scope || ""
+              });
+            }
           }
+        } catch (err) {
+          console.warn("Failed refreshing Baidu access token:", err);
         }
-      } catch (err) {
-        console.warn("Failed refreshing Baidu access token:", err);
       }
-    }
-    return this.accessToken;
+      return this.accessToken;
+    });
   }
   /**
    * Get user info from Baidu Netdisk (test connectivity)
@@ -467,11 +593,22 @@ var BaiduClient = class {
       );
     }
     const uploadid = precreateData.uploadid;
-    if (precreateData.return_type !== 1 && chunks.length > 0) {
-      for (let partseq = 0; partseq < chunks.length; partseq++) {
-        const chunk = chunks[partseq];
-        await this.uploadChunk(remotePath, uploadid, partseq, chunk);
+    if (precreateData.return_type === 2) {
+      if (!precreateData.info?.fs_id && !precreateData.fs_id) {
+        throw new Error("Rapid upload response missing committed file metadata");
       }
+      const info = precreateData.info || precreateData;
+      return { fsId: String(info.fs_id), md5: info.md5 || calculateMd5(bytes) };
+    }
+    if (precreateData.return_type !== 1 || !uploadid) {
+      throw new Error("Invalid precreate response: no valid upload session");
+    }
+    const missingParts = precreateData.block_list;
+    if (!Array.isArray(missingParts) || missingParts.some((index) => !Number.isInteger(index) || index < 0 || index >= chunks.length)) {
+      throw new Error("Invalid precreate missing-block list");
+    }
+    for (const partseq of missingParts) {
+      await this.uploadChunk(remotePath, uploadid, partseq, chunks[partseq]);
     }
     const createUrl = `https://pan.baidu.com/rest/2.0/xpan/file?method=create&access_token=${token}`;
     const createBody = new URLSearchParams({
@@ -495,6 +632,9 @@ var BaiduClient = class {
       throw new Error(
         `Atomic commit (create) failed for "${remotePath}" (errno: ${createData.errno})`
       );
+    }
+    if (!createData.fs_id || createData.size !== void 0 && Number(createData.size) !== bytes.length) {
+      throw new Error("Commit response missing valid file metadata");
     }
     return {
       fsId: String(createData.fs_id),
@@ -531,8 +671,7 @@ Content-Type: application/octet-stream\r
       url,
       method: "POST",
       headers: {
-        "Content-Type": `multipart/form-data; boundary=${boundary}`,
-        "Content-Length": String(multipartBody.length)
+        "Content-Type": `multipart/form-data; boundary=${boundary}`
       },
       body: multipartBody.buffer.slice(
         multipartBody.byteOffset,
@@ -756,6 +895,7 @@ var DEFAULT_SETTINGS = {
   username: "",
   remoteBasePath: "/apps/obsidian-vault",
   autoSync: false,
+  uploadConcurrency: 3,
   syncIntervalMinutes: 15,
   syncOnStartup: true,
   syncOnModifyDebounceSeconds: 3,
@@ -963,6 +1103,12 @@ var BaiduSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
         this.plugin.resetAutoSyncTimer();
       })
     );
+    new import_obsidian2.Setting(containerEl).setName("\u4E0A\u4F20\u5E76\u53D1\u6570").setDesc("\u5168\u91CF\u540C\u6B65\u540C\u65F6\u4E0A\u4F20 1\u20133 \u4E2A\u4E0D\u540C\u6587\u4EF6\uFF1B\u5355\u6587\u4EF6\u63D0\u4EA4\u3001\u4E0B\u8F7D\u3001\u51B2\u7A81\u5904\u7406\u548C\u672C\u5730\u539F\u5B50\u5199\u5165\u4ECD\u4FDD\u6301\u987A\u5E8F\u3002").addDropdown(
+      (dropdown) => dropdown.addOptions({ "1": "1\uFF08\u4E32\u884C\uFF09", "2": "2", "3": "3\uFF08\u63A8\u8350\uFF09" }).setValue(String(this.plugin.settings.uploadConcurrency || 3)).onChange(async (value) => {
+        this.plugin.settings.uploadConcurrency = Number(value);
+        await this.plugin.saveSettings();
+      })
+    );
     new import_obsidian2.Setting(containerEl).setName("\u81EA\u52A8\u540C\u6B65\u95F4\u9694 (\u5206\u949F)").setDesc("\u6BCF\u9694\u591A\u5C11\u5206\u949F\u81EA\u52A8\u6267\u884C\u4E00\u6B21\u540E\u53F0\u540C\u6B65\u6BD4\u5BF9").addText(
       (text) => text.setPlaceholder("15").setValue(String(this.plugin.settings.syncIntervalMinutes)).onChange(async (val) => {
         const num = parseInt(val, 10);
@@ -983,12 +1129,7 @@ var BaiduSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
       })
     );
     new import_obsidian2.Setting(containerEl).setName("5. \u51B2\u7A81\u4E0E\u6570\u636E\u4FDD\u62A4\u7B56\u7565 (Conflict Resolution)").setHeading();
-    new import_obsidian2.Setting(containerEl).setName("\u51B2\u7A81\u89E3\u51B3\u7B56\u7565").setDesc("\u5F53\u672C\u5730\u4E0E\u7F51\u76D8\u540C\u65F6\u4FEE\u6539\u4EA7\u751F\u5206\u6B67\u65F6\u7684\u88C1\u51B3\u673A\u5236").addDropdown(
-      (drop) => drop.addOption("create_conflict_file", "\u5B89\u5168\u5206\u652F\u526F\u672C (\u63A8\u8350\uFF1A\u96F6\u6570\u636E\u4E22\u5931\uFF0C\u4FDD\u7559\u672C\u5730\u5E76\u751F\u6210\u51B2\u7A81\u6587\u4EF6)").addOption("keep_newer", "\u4EE5\u8F83\u65B0\u4FEE\u6539\u65F6\u95F4\u4E3A\u51C6 (Last-Write-Wins)").addOption("keep_local", "\u5F3A\u5236\u4EE5\u672C\u5730\u4E3A\u51C6 (\u8986\u76D6\u8FDC\u7AEF)").addOption("keep_remote", "\u5F3A\u5236\u4EE5\u8FDC\u7AEF\u4E3A\u51C6 (\u8986\u76D6\u672C\u5730)").setValue(this.plugin.settings.conflictStrategy).onChange(async (val) => {
-        this.plugin.settings.conflictStrategy = val;
-        await this.plugin.saveSettings();
-      })
-    );
+    new import_obsidian2.Setting(containerEl).setName("\u51B2\u7A81\u4EA4\u7531\u4EBA\u5DE5\u89E3\u51B3").setDesc("\u4FDD\u7559\u672C\u5730\u539F\u6587\u4EF6\u548C\u7F51\u76D8\u526F\u672C\uFF1B\u6682\u505C\u51B2\u7A81\u6587\u4EF6\u540C\u6B65\uFF0C\u786E\u8BA4\u5DF2\u89E3\u51B3\u540E\u624D\u63D0\u4EA4\uFF0C\u4E0D\u518D\u6309\u65F6\u95F4\u6216\u6765\u6E90\u81EA\u52A8\u8986\u76D6\u3002").addButton((b) => b.setButtonText(`\u67E5\u770B\u5F85\u5904\u7406\u51B2\u7A81 (${this.plugin.syncEngine.getPendingConflicts().length})`).onClick(() => this.plugin.openConflictReview()));
     new import_obsidian2.Setting(containerEl).setName("\u540C\u6B65 .obsidian \u914D\u7F6E\u76EE\u5F55").setDesc("\u662F\u5426\u540C\u6B65 Obsidian \u5185\u90E8\u914D\u7F6E\uFF08\u81EA\u52A8\u7CBE\u51C6\u6392\u9664\u8BBE\u5907\u4E13\u7528\u7684 workspace \u7F13\u5B58\uFF09").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.syncObsidianConfig).onChange(async (val) => {
         this.plugin.settings.syncObsidianConfig = val;
@@ -1017,7 +1158,7 @@ var BaiduSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
       })
     );
     new import_obsidian2.Setting(containerEl).setName("6. \u624B\u52A8\u64CD\u4F5C\u4E0E\u65E5\u5FD7 (Actions & Logs)").setHeading();
-    new import_obsidian2.Setting(containerEl).setName("\u5168\u91CF\u53CC\u5411\u540C\u6B65").setDesc("\u7ACB\u5373\u6309\u4E25\u683C\u65F6\u95F4\u987A\u5E8F\u548C\u539F\u5B50\u68C0\u67E5\u673A\u5236\u6267\u884C\u6BD4\u5BF9\u4E0E\u540C\u6B65").addButton(
+    new import_obsidian2.Setting(containerEl).setName("\u5168\u91CF\u53CC\u5411\u540C\u6B65").setDesc("\u6709\u9650\u5E76\u53D1\u4E0A\u4F20\u4E0D\u540C\u6587\u4EF6\uFF0C\u5E76\u4FDD\u7559\u5355\u6587\u4EF6\u63D0\u4EA4\u987A\u5E8F\u3001\u51B2\u7A81\u4FDD\u62A4\u4E0E\u539F\u5B50\u5199\u5165").addButton(
       (btn) => btn.setButtonText("\u7ACB\u5373\u540C\u6B65").setCta().onClick(async () => {
         await this.plugin.runSync();
       })
@@ -1299,7 +1440,7 @@ function generateConflictPath(originalPath) {
   const pad = (n) => n.toString().padStart(2, "0");
   const timestamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(
     now.getHours()
-  )}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  )}${pad(now.getMinutes())}${pad(now.getSeconds())}-${Math.random().toString(36).slice(2, 10)}`;
   const lastDot = filename.lastIndexOf(".");
   let conflictName;
   if (lastDot > 0) {
@@ -1311,110 +1452,6 @@ function generateConflictPath(originalPath) {
   }
   return dir ? joinPaths(dir, conflictName) : conflictName;
 }
-
-// src/sync/queue.ts
-var Mutex = class {
-  constructor() {
-    this.current = Promise.resolve();
-  }
-  async acquire(task) {
-    let release;
-    const next = new Promise((resolve) => {
-      release = resolve;
-    });
-    const previous = this.current;
-    this.current = next;
-    await previous;
-    try {
-      return await task();
-    } finally {
-      release();
-    }
-  }
-  isLocked() {
-    let locked = true;
-    Promise.race([
-      this.current.then(() => false),
-      Promise.resolve(true)
-    ]).then((val) => {
-      locked = val;
-    });
-    return locked;
-  }
-};
-var FifoQueue = class {
-  constructor() {
-    this.queue = [];
-    this.isProcessing = false;
-  }
-  /**
-   * Enqueue a task to be executed strictly in FIFO order.
-   */
-  enqueue(task) {
-    return new Promise((resolve, reject) => {
-      this.queue.push(async () => {
-        try {
-          const result = await task();
-          resolve(result);
-        } catch (err) {
-          reject(err);
-        }
-      });
-      this.processNext();
-    });
-  }
-  async processNext() {
-    if (this.isProcessing) return;
-    if (this.queue.length === 0) return;
-    this.isProcessing = true;
-    const task = this.queue.shift();
-    if (task) {
-      try {
-        await task();
-      } catch (err) {
-        console.error("Queue task execution error:", err);
-      } finally {
-        this.isProcessing = false;
-        this.processNext();
-      }
-    } else {
-      this.isProcessing = false;
-    }
-  }
-  get length() {
-    return this.queue.length;
-  }
-  clear() {
-    this.queue = [];
-  }
-};
-var DebounceManager = class {
-  constructor() {
-    this.timers = /* @__PURE__ */ new Map();
-  }
-  debounce(key, delayMs, fn) {
-    if (this.timers.has(key)) {
-      window.clearTimeout(this.timers.get(key));
-    }
-    const timer = window.setTimeout(() => {
-      this.timers.delete(key);
-      fn();
-    }, delayMs);
-    this.timers.set(key, timer);
-  }
-  cancel(key) {
-    if (this.timers.has(key)) {
-      window.clearTimeout(this.timers.get(key));
-      this.timers.delete(key);
-    }
-  }
-  clearAll() {
-    for (const timer of this.timers.values()) {
-      window.clearTimeout(timer);
-    }
-    this.timers.clear();
-  }
-};
 
 // src/utils/atomic.ts
 var import_obsidian3 = require("obsidian");
@@ -1611,7 +1648,8 @@ var SyncStateStore = class {
           this.data = {
             version: parsed.version || 1,
             lastFullSyncTimestamp: parsed.lastFullSyncTimestamp || 0,
-            files: parsed.files || {}
+            files: parsed.files || {},
+            conflicts: parsed.conflicts || {}
           };
         } else {
           throw new Error("Invalid sync state");
@@ -1621,6 +1659,20 @@ var SyncStateStore = class {
       throw new Error(`\u540C\u6B65\u57FA\u7EBF\u52A0\u8F7D\u5931\u8D25\uFF0C\u5DF2\u505C\u6B62\u540C\u6B65\u4EE5\u4FDD\u62A4\u73B0\u6709\u6587\u4EF6: ${String(err)}`);
     }
     this.isDirty = false;
+  }
+  getConflicts() {
+    return Object.values(this.data.conflicts || {});
+  }
+  setConflict(record) {
+    var _a;
+    ((_a = this.data).conflicts || (_a.conflicts = {}))[record.path] = record;
+    this.isDirty = true;
+  }
+  clearConflict(path) {
+    if (this.data.conflicts?.[path]) {
+      delete this.data.conflicts[path];
+      this.isDirty = true;
+    }
   }
   /**
    * Get metadata entry for a file
@@ -1740,9 +1792,11 @@ var SyncEngine = class {
   shouldIgnore(vaultPath) {
     const norm = normalizeVaultPath(vaultPath);
     if (!norm) return true;
+    if (/\.conflict-\d{8}-\d{6}(?:-[a-z0-9]+)?(?:\.|$)/.test(norm)) return true;
     if (norm.startsWith(".trash/") || norm.startsWith(".git/")) return true;
     const ownDir = `${this.app.vault.configDir || ".obsidian"}/plugins/baidu-sync`;
     if (norm === ownDir || norm.startsWith(ownDir + "/")) return true;
+    if (this.getPendingConflicts().some((c) => c.path === norm || c.copies.includes(norm))) return true;
     const settings = this.getSettings();
     if (norm.startsWith(".obsidian/")) {
       if (!settings.syncObsidianConfig) return true;
@@ -1768,7 +1822,7 @@ var SyncEngine = class {
     const debounceSeconds = this.getSettings().syncOnModifyDebounceSeconds || 3;
     this.debounceManager.debounce(file.path, debounceSeconds * 1e3, () => {
       this.taskQueue.enqueue(async () => {
-        await this.syncSingleFile(file.path);
+        await this.syncSingleFile(file.path, true);
       });
     });
   }
@@ -1779,14 +1833,14 @@ var SyncEngine = class {
     if (this.shouldIgnore(file.path)) return;
     this.debounceManager.debounce(file.path, 1e3, () => {
       this.taskQueue.enqueue(async () => {
-        await this.syncSingleFile(file.path);
+        await this.syncSingleFile(file.path, true);
       });
     });
   }
   /**
    * Sync a single file safely within sync lock
    */
-  async syncSingleFile(vaultPath) {
+  async syncSingleFile(vaultPath, localChangeOnly = false) {
     if (this.shouldIgnore(vaultPath)) return;
     return this.syncMutex.acquire(async () => {
       try {
@@ -1795,8 +1849,12 @@ var SyncEngine = class {
         const remotePath = toRemotePath(settings.remoteBasePath, vaultPath);
         const base = this.stateStore.get(vaultPath);
         const localInspection = await this.inspectLocalFile(vaultPath);
+        if (localChangeOnly && base && localInspection.exists && localInspection.md5 === base.localMd5) {
+          return;
+        }
         const remoteInspection = await this.inspectRemoteFile(remotePath);
         const decision = determineSyncAction(localInspection, remoteInspection, base);
+        if (decision.action === "noop") return;
         await this.executeAction(vaultPath, remotePath, decision, localInspection, remoteInspection, base);
         await this.stateStore.save();
       } catch (err) {
@@ -1811,6 +1869,7 @@ var SyncEngine = class {
     return this.syncMutex.acquire(async () => {
       const result = {
         total: 0,
+        skipped: 0,
         uploaded: 0,
         downloaded: 0,
         conflicted: 0,
@@ -1822,11 +1881,11 @@ var SyncEngine = class {
         new import_obsidian4.Notice("\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\uFF1A\u8BF7\u5148\u5728\u8BBE\u7F6E\u4E2D\u586B\u5199\u5E76\u6388\u6743 Access Token\uFF01");
         return result;
       }
+      const startedAt = Date.now();
       this.isSyncing = true;
       this.setStatus("\u6B63\u5728\u540C\u6B65...", true);
       this.log("info", "\u5F00\u59CB\u6267\u884C\u5168\u91CF\u53CC\u5411\u540C\u6B65\u6BD4\u5BF9...");
       try {
-        await this.client.createDirectory(settings.remoteBasePath);
         this.setStatus("\u626B\u63CF\u672C\u5730\u6587\u4EF6...", true);
         const localFiles = this.app.vault.getFiles().filter((f) => !this.shouldIgnore(f.path));
         const localMap = /* @__PURE__ */ new Map();
@@ -1850,15 +1909,21 @@ var SyncEngine = class {
           ...Object.keys(baseEntries)
         ]);
         result.total = allPaths.size;
-        let index = 0;
+        const uploads = [];
+        const serial = [];
+        let completed = 0;
         for (const path of allPaths) {
-          index++;
-          this.setStatus(`\u540C\u6B65\u8FDB\u5EA6 (${index}/${allPaths.size})`, true);
+          this.setStatus(`\u68C0\u67E5\u6587\u4EF6 (${uploads.length + serial.length + completed + 1}/${allPaths.size})`, true);
           try {
+            if (this.shouldIgnore(path)) {
+              completed++;
+              result.skipped++;
+              continue;
+            }
             const remotePath = toRemotePath(settings.remoteBasePath, path);
             const base = baseEntries[path];
             const localFile = localMap.get(path);
-            const localInspection = await this.inspectLocalFile(path, localFile);
+            let localInspection = await this.inspectLocalFile(path, localFile);
             const remoteItem = remoteMap.get(path);
             const remoteInspection = remoteItem ? {
               exists: true,
@@ -1867,34 +1932,71 @@ var SyncEngine = class {
               size: remoteItem.size,
               fsId: remoteItem.fsId
             } : { exists: false };
-            const decision = determineSyncAction(localInspection, remoteInspection, base);
-            if (decision.action !== "noop") {
-              await this.executeAction(path, remotePath, decision, localInspection, remoteInspection, base);
-              if (decision.action === "upload") {
-                result.uploaded++;
-                this.log("success", `\u4E0A\u4F20\u6210\u529F: ${path}`);
-              } else if (decision.action === "download") {
-                result.downloaded++;
-                this.log("success", `\u4E0B\u8F7D\u6210\u529F: ${path}`);
-              } else if (decision.action === "conflict") {
-                result.conflicted++;
-                this.log("warn", `\u51B2\u7A81\u5DF2\u5904\u7406 (\u751F\u6210\u5B89\u5168\u526F\u672C): ${path}`);
-              } else if (decision.action === "delete_local" || decision.action === "delete_remote") {
-                result.deleted++;
-                this.log("info", `\u5220\u9664\u540C\u6B65\u5B8C\u6210: ${path}`);
-              }
+            let decision = determineSyncAction(localInspection, remoteInspection, base);
+            if (decision.action === "noop") {
+              completed++;
+              result.skipped++;
+              continue;
             }
+            const work = async () => {
+              const itemStarted = Date.now();
+              const wasUpload = decision.action === "upload";
+              try {
+                localInspection = await this.inspectLocalFile(path);
+                decision = determineSyncAction(localInspection, remoteInspection, base);
+                if (wasUpload && decision.action !== "upload") {
+                  this.log("warn", `\u6587\u4EF6\u5728\u6392\u961F\u671F\u95F4\u53D1\u751F\u53D8\u5316\uFF0C\u7559\u5F85\u4E0B\u6B21\u540C\u6B65: ${path}`);
+                  return;
+                }
+                if (decision.action !== "noop") {
+                  await this.executeAction(path, remotePath, decision, localInspection, remoteInspection, base);
+                  if (decision.action === "upload") {
+                    result.uploaded++;
+                    this.log("success", `\u4E0A\u4F20\u6210\u529F: ${path}`);
+                  } else if (decision.action === "download") {
+                    result.downloaded++;
+                    this.log("success", `\u4E0B\u8F7D\u6210\u529F: ${path}`);
+                  } else if (decision.action === "conflict") {
+                    result.conflicted++;
+                    this.log("warn", `\u51B2\u7A81\u5F85\u4EBA\u5DE5\u5904\u7406: ${path}`);
+                  } else if (decision.action === "delete_local" || decision.action === "delete_remote") {
+                    result.deleted++;
+                    this.log("info", `\u5220\u9664\u540C\u6B65\u5B8C\u6210: ${path}`);
+                  }
+                }
+              } catch (itemErr) {
+                this.log("error", `\u540C\u6B65\u5931\u8D25: ${path}`, itemErr.message || String(itemErr));
+                result.errors.push({ path, error: itemErr.message || String(itemErr) });
+                return;
+              } finally {
+                completed++;
+                this.setStatus(`\u540C\u6B65\u8FDB\u5EA6 (${completed}/${allPaths.size})`, true);
+              }
+              await this.stateStore.save();
+              if (decision.action === "upload") {
+                this.log("info", `\u4E0A\u4F20\u8017\u65F6: ${path} ${(Date.now() - itemStarted) / 1e3}s`);
+              }
+            };
+            (decision.action === "upload" ? uploads : serial).push(work);
           } catch (itemErr) {
+            completed++;
             this.log("error", `\u540C\u6B65\u5931\u8D25: ${path}`, itemErr.message || String(itemErr));
             result.errors.push({ path, error: itemErr.message || String(itemErr) });
           }
         }
-        this.stateStore.setLastFullSyncTimestamp(Date.now());
-        await this.stateStore.save();
-        this.setStatus("\u5DF2\u540C\u6B65", false);
-        const summary = `\u540C\u6B65\u5B8C\u6210: \u2191${result.uploaded} \u2193${result.downloaded} \u26A0${result.conflicted} \u2715${result.deleted}${result.errors.length ? ` (\u5931\u8D25: ${result.errors.length})` : ""}`;
+        const concurrency = Math.max(1, Math.min(3, Math.floor(settings.uploadConcurrency || 3)));
+        this.log("info", `\u4E0A\u4F20\u8BA1\u5212: ${uploads.length} \u4E2A\u6587\u4EF6\uFF0C\u5E76\u53D1 ${concurrency}`);
+        if (uploads.length || serial.length) await this.client.createDirectory(settings.remoteBasePath);
+        await runBounded(uploads, concurrency, (work) => work());
+        for (const work of serial) await work();
+        if (result.uploaded || result.downloaded || result.conflicted || result.deleted) {
+          this.stateStore.setLastFullSyncTimestamp(Date.now());
+          await this.stateStore.save();
+        }
+        this.setStatus(this.getPendingConflicts().length ? "\u90E8\u5206\u6587\u4EF6\u5F85\u4EBA\u5DE5\u89E3\u51B3\u51B2\u7A81" : "\u5DF2\u540C\u6B65", false);
+        const summary = `\u540C\u6B65\u5B8C\u6210: \u8DF3\u8FC7${result.skipped} \u2191${result.uploaded} \u2193${result.downloaded} \u26A0${result.conflicted} \u2715${result.deleted}${result.errors.length ? ` (\u5931\u8D25: ${result.errors.length})` : ""}`;
         new import_obsidian4.Notice(summary);
-        this.log("info", summary);
+        this.log("info", `${summary}\uFF1B\u603B\u8017\u65F6 ${((Date.now() - startedAt) / 1e3).toFixed(1)}s`);
       } catch (err) {
         this.log("error", "\u5168\u91CF\u540C\u6B65\u8FC7\u7A0B\u5F02\u5E38\u9000\u51FA", err.message || String(err));
         new import_obsidian4.Notice(`\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u9519\u8BEF: ${err.message || String(err)}`);
@@ -1915,7 +2017,7 @@ var SyncEngine = class {
         return;
       case "upload": {
         let buffer = await this.atomicFs.readBinary(localPath);
-        const localRawMd5 = local.md5 || calculateMd5(buffer);
+        const localRawMd5 = calculateMd5(buffer);
         if (settings.enableE2EE) {
           if (!settings.e2eePassword || settings.e2eePassword.trim().length === 0) {
             throw new Error(`\u5DF2\u542F\u7528\u7AEF\u5230\u7AEF\u52A0\u5BC6\u4F46\u672A\u8BBE\u7F6E\u5BC6\u7801\uFF0C\u5DF2\u4E2D\u6B62\u4E0A\u4F20: ${localPath}`);
@@ -1975,181 +2077,85 @@ var SyncEngine = class {
       }
     }
   }
-  /**
-   * Robust conflict resolver with guaranteed convergence across all conflict scenarios:
-   * 1. Both modified -> Safe branch conflict file + update base snapshot to converge
-   * 2. Remote deleted, local modified -> Keep local & re-upload to converge
-   * 3. Local deleted, remote modified -> Keep remote & re-download to converge
-   */
+  getPendingConflicts() {
+    return this.stateStore.getConflicts?.() || [];
+  }
+  /** Keep the original and the remote snapshot; never advance the baseline or
+   * make a remote mutation until the user explicitly confirms resolution. */
   async resolveConflict(localPath, remotePath, decision, local, remote, base) {
-    const settings = this.getSettings();
-    const strategy = settings.conflictStrategy || "create_conflict_file";
-    if (decision.conflictSubtype === "remote_deleted_local_modified" || local.exists && !remote.exists) {
-      let buffer = await this.atomicFs.readBinary(localPath);
-      const localMd5 = local.md5 || calculateMd5(buffer);
-      if (settings.enableE2EE) {
-        if (!settings.e2eePassword?.trim()) throw new Error("\u5DF2\u542F\u7528\u52A0\u5BC6\u4F46\u7F3A\u5C11\u5BC6\u7801\uFF0C\u5DF2\u4E2D\u6B62\u4E0A\u4F20");
-        buffer = await encryptData(buffer, settings.e2eePassword);
-      }
-      const uploadResult = await this.client.uploadFile(remotePath, buffer);
-      this.stateStore.set(localPath, {
-        path: localPath,
-        localMtime: local.mtime || Date.now(),
-        localMd5,
-        remoteFsId: uploadResult.fsId,
-        remoteMtime: Date.now(),
-        remoteMd5: uploadResult.md5 || localMd5,
-        lastSyncTime: Date.now()
-      });
-      this.log("info", `\u51B2\u7A81\u6536\u655B\uFF1A\u7F51\u76D8\u7AEF\u66FE\u88AB\u5220\u9664\uFF0C\u4F46\u672C\u5730\u6709\u65B0\u4FEE\u6539\uFF0C\u5DF2\u81EA\u52A8\u4FDD\u7559\u5E76\u91CD\u65B0\u63A8\u9001\u5230\u7F51\u76D8: ${localPath}`);
-      new import_obsidian4.Notice(`\u51B2\u7A81\u5DF2\u6536\u655B\uFF1A\u672C\u5730\u65B0\u4FEE\u6539\u5DF2\u91CD\u65B0\u540C\u6B65\u81F3\u7F51\u76D8: ${localPath}`);
-      return;
-    }
-    if (decision.conflictSubtype === "local_deleted_remote_modified" || !local.exists && remote.exists) {
-      if (!remote.fsId) {
-        throw new Error(`\u65E0\u6CD5\u62C9\u53D6\u8FDC\u7AEF\u66F4\u65B0: \u7F3A\u5C11 fs_id: ${localPath}`);
-      }
-      let data = await this.client.downloadFile(remote.fsId);
+    const existing = this.getPendingConflicts().find((c) => c.path === localPath);
+    if (existing && existing.remote.md5 === remote.md5 && existing.remote.fsId === remote.fsId && existing.remote.exists === remote.exists && (!remote.exists || existing.copies.length && await this.app.vault.adapter.exists(existing.copies[existing.copies.length - 1]))) return;
+    let data;
+    let copyPath;
+    if (remote.exists) {
+      if (!remote.fsId) throw new Error("\u51B2\u7A81\u7F3A\u5C11\u8FDC\u7AEF\u6587\u4EF6\u6807\u8BC6");
+      data = await this.client.downloadFile(remote.fsId);
+      const settings = this.getSettings();
       if (isEncrypted(data) || settings.enableE2EE) {
-        if (!settings.e2eePassword) {
-          throw new Error(`\u65E0\u6CD5\u89E3\u5BC6\u8FDC\u7AEF\u66F4\u65B0: ${localPath}`);
-        }
+        if (!settings.e2eePassword) throw new Error("\u65E0\u6CD5\u89E3\u5BC6\u8FDC\u7AEF\u51B2\u7A81\u526F\u672C");
         data = await decryptData(data, settings.e2eePassword);
       }
-      const downloadedMd5 = calculateMd5(data);
-      await this.atomicFs.atomicWrite(localPath, data, downloadedMd5);
-      const newStat = await this.app.vault.adapter.stat(localPath);
-      this.stateStore.set(localPath, {
-        path: localPath,
-        localMtime: newStat ? newStat.mtime : Date.now(),
-        localMd5: downloadedMd5,
-        remoteFsId: remote.fsId,
-        remoteMtime: remote.mtime || Date.now(),
-        remoteMd5: remote.md5 || downloadedMd5,
-        lastSyncTime: Date.now()
-      });
-      this.log("info", `\u51B2\u7A81\u6536\u655B\uFF1A\u672C\u5730\u66FE\u88AB\u5220\u9664\uFF0C\u4F46\u7F51\u76D8\u6709\u65B0\u4FEE\u6539\uFF0C\u5DF2\u81EA\u52A8\u4FDD\u7559\u5E76\u62C9\u53D6\u6700\u65B0\u5185\u5BB9: ${localPath}`);
-      new import_obsidian4.Notice(`\u51B2\u7A81\u5DF2\u6536\u655B\uFF1A\u5DF2\u62C9\u53D6\u7F51\u76D8\u6700\u65B0\u7248\u672C: ${localPath}`);
-      return;
+      copyPath = generateConflictPath(localPath);
+      while (await this.app.vault.adapter.exists(copyPath)) copyPath = generateConflictPath(localPath);
     }
-    if (strategy === "keep_local" && local.exists) {
-      let buffer = await this.atomicFs.readBinary(localPath);
-      const localMd5 = local.md5 || calculateMd5(buffer);
-      if (settings.enableE2EE) {
-        if (!settings.e2eePassword?.trim()) throw new Error("\u5DF2\u542F\u7528\u52A0\u5BC6\u4F46\u7F3A\u5C11\u5BC6\u7801\uFF0C\u5DF2\u4E2D\u6B62\u4E0A\u4F20");
-        buffer = await encryptData(buffer, settings.e2eePassword);
-      }
-      const uploadResult = await this.client.uploadFile(remotePath, buffer);
-      this.stateStore.set(localPath, {
-        path: localPath,
-        localMtime: local.mtime || Date.now(),
-        localMd5,
-        remoteFsId: uploadResult.fsId,
-        remoteMtime: Date.now(),
-        remoteMd5: uploadResult.md5 || localMd5,
-        lastSyncTime: Date.now()
-      });
-      new import_obsidian4.Notice(`\u51B2\u7A81\u5DF2\u5904\u7406 (\u4FDD\u7559\u672C\u5730\u7248\u672C): ${localPath}`);
-      return;
-    }
-    if (strategy === "keep_remote" && remote.exists && remote.fsId) {
-      let data = await this.client.downloadFile(remote.fsId);
-      if (isEncrypted(data) || settings.enableE2EE) {
-        if (!settings.e2eePassword) {
-          throw new Error(`\u65E0\u6CD5\u89E3\u5BC6\u8FDC\u7AEF\u51B2\u7A81\u6587\u4EF6: ${localPath}`);
-        }
-        data = await decryptData(data, settings.e2eePassword);
-      }
-      const downloadedMd5 = calculateMd5(data);
-      await this.atomicFs.atomicWrite(localPath, data, downloadedMd5);
-      const newStat = await this.app.vault.adapter.stat(localPath);
-      this.stateStore.set(localPath, {
-        path: localPath,
-        localMtime: newStat ? newStat.mtime : Date.now(),
-        localMd5: downloadedMd5,
-        remoteFsId: remote.fsId,
-        remoteMtime: remote.mtime || Date.now(),
-        remoteMd5: remote.md5 || downloadedMd5,
-        lastSyncTime: Date.now()
-      });
-      new import_obsidian4.Notice(`\u51B2\u7A81\u5DF2\u5904\u7406 (\u4FDD\u7559\u8FDC\u7AEF\u7248\u672C): ${localPath}`);
-      return;
-    }
-    if (strategy === "keep_newer" && local.exists && remote.exists) {
-      const localMtime = local.mtime || 0;
-      const remoteMtime = remote.mtime || 0;
-      if (localMtime >= remoteMtime) {
-        let buffer = await this.atomicFs.readBinary(localPath);
-        const localMd5 = local.md5 || calculateMd5(buffer);
-        if (settings.enableE2EE) {
-          if (!settings.e2eePassword?.trim()) throw new Error("\u5DF2\u542F\u7528\u52A0\u5BC6\u4F46\u7F3A\u5C11\u5BC6\u7801\uFF0C\u5DF2\u4E2D\u6B62\u4E0A\u4F20");
-          buffer = await encryptData(buffer, settings.e2eePassword);
-        }
-        const uploadResult = await this.client.uploadFile(remotePath, buffer);
-        this.stateStore.set(localPath, {
-          path: localPath,
-          localMtime,
-          localMd5,
-          remoteFsId: uploadResult.fsId,
-          remoteMtime: Date.now(),
-          remoteMd5: uploadResult.md5 || localMd5,
-          lastSyncTime: Date.now()
-        });
-        new import_obsidian4.Notice(`\u51B2\u7A81\u5DF2\u5904\u7406 (\u4FDD\u7559\u8F83\u65B0\u672C\u5730\u7248\u672C): ${localPath}`);
-        return;
-      } else if (remote.fsId) {
-        let data = await this.client.downloadFile(remote.fsId);
-        if (isEncrypted(data) || settings.enableE2EE) {
-          if (!settings.e2eePassword) {
-            throw new Error(`\u65E0\u6CD5\u89E3\u5BC6\u8F83\u65B0\u7684\u8FDC\u7AEF\u51B2\u7A81\u7248\u672C: ${localPath}`);
-          }
-          data = await decryptData(data, settings.e2eePassword);
-        }
-        const downloadedMd5 = calculateMd5(data);
-        await this.atomicFs.atomicWrite(localPath, data, downloadedMd5);
-        this.stateStore.set(localPath, {
-          path: localPath,
-          localMtime: remoteMtime,
-          localMd5: downloadedMd5,
-          remoteFsId: remote.fsId,
-          remoteMtime,
-          remoteMd5: remote.md5 || downloadedMd5,
-          lastSyncTime: Date.now()
-        });
-        new import_obsidian4.Notice(`\u51B2\u7A81\u5DF2\u5904\u7406 (\u4FDD\u7559\u8F83\u65B0\u8FDC\u7AEF\u7248\u672C): ${localPath}`);
-        return;
-      }
-    }
-    if (remote.exists && remote.fsId) {
-      const conflictPath = generateConflictPath(localPath);
-      let remoteData = await this.client.downloadFile(remote.fsId);
-      const remoteCipherMd5 = calculateMd5(remoteData);
-      if (isEncrypted(remoteData) || settings.enableE2EE) {
-        if (!settings.e2eePassword) {
-          throw new Error(`\u65E0\u6CD5\u89E3\u5BC6\u8FDC\u7AEF\u51B2\u7A81\u526F\u672C: ${localPath}`);
-        }
-        remoteData = await decryptData(remoteData, settings.e2eePassword);
-      }
-      const remoteMd5 = calculateMd5(remoteData);
-      await this.atomicFs.atomicWrite(conflictPath, remoteData, remoteMd5);
-      if (local.exists) {
-        this.stateStore.set(localPath, {
-          path: localPath,
-          localMtime: local.mtime || Date.now(),
-          localMd5: local.md5 || "",
-          remoteFsId: remote.fsId,
-          remoteMtime: remote.mtime || Date.now(),
-          remoteMd5: remote.md5 || remoteCipherMd5,
-          lastSyncTime: Date.now()
-        });
-      }
-      new import_obsidian4.Notice(
-        `\u68C0\u6D4B\u5230\u5E76\u53D1\u51B2\u7A81\uFF1A\u201C${localPath}\u201D\uFF01
-\u5DF2\u4FDD\u7559\u672C\u5730\u5185\u5BB9\uFF0C\u8FDC\u7AEF\u7248\u672C\u53E6\u5B58\u4E3A\uFF1A\u201C${conflictPath}\u201D`,
-        8e3
+    const record = {
+      path: localPath,
+      remotePath,
+      copies: [...existing?.copies || [], ...copyPath ? [copyPath] : []],
+      remote: { exists: remote.exists, md5: remote.md5, fsId: remote.fsId, mtime: remote.mtime },
+      createdAt: existing?.createdAt || Date.now()
+    };
+    this.stateStore.setConflict(record);
+    await this.stateStore.save();
+    if (copyPath && data) await this.atomicFs.atomicWrite(copyPath, data, calculateMd5(data));
+    this.log("warn", `\u5F85\u4EBA\u5DE5\u89E3\u51B3\u51B2\u7A81: ${localPath}${copyPath ? `\uFF1B\u8FDC\u7AEF\u526F\u672C: ${copyPath}` : "\uFF1B\u8FDC\u7AEF\u5DF2\u5220\u9664"}`);
+    new import_obsidian4.Notice(`\u767E\u5EA6\u540C\u6B65\u53D1\u73B0\u51B2\u7A81\uFF1A${localPath}\u3002\u5DF2\u6682\u505C\u6B64\u6587\u4EF6\u540C\u6B65\uFF0C\u8BF7\u6253\u5F00\u201C\u5F85\u5904\u7406\u51B2\u7A81\u201D\u4EBA\u5DE5\u5408\u5E76\u5E76\u786E\u8BA4\u3002`, 15e3);
+  }
+  async refreshPendingConflict(path) {
+    return this.syncMutex.acquire(async () => {
+      const record = this.getPendingConflicts().find((c) => c.path === path);
+      if (!record) return;
+      await this.resolveConflict(
+        path,
+        record.remotePath,
+        { action: "conflict", reason: "User refreshed snapshot", isConflict: true },
+        await this.inspectLocalFile(path),
+        await this.inspectRemoteFile(record.remotePath)
       );
-      this.log("warn", `\u5E76\u53D1\u51B2\u7A81\u5DF2\u6536\u655B\uFF1A\u5DF2\u751F\u6210\u526F\u672C "${conflictPath}" \u5E76\u66F4\u65B0\u57FA\u7EBF\u5FEB\u7167`);
-    }
+    });
+  }
+  async confirmConflictResolved(path) {
+    return this.syncMutex.acquire(async () => {
+      const record = this.getPendingConflicts().find((c) => c.path === path);
+      if (!record) return;
+      const remote = await this.inspectRemoteFile(record.remotePath);
+      if (remote.exists !== record.remote.exists || remote.md5 !== record.remote.md5 || remote.fsId !== record.remote.fsId) {
+        await this.resolveConflict(
+          path,
+          record.remotePath,
+          { action: "conflict", reason: "Remote changed again", isConflict: true },
+          await this.inspectLocalFile(path),
+          remote
+        );
+        throw new Error("\u8FDC\u7AEF\u53C8\u53D1\u751F\u4E86\u53D8\u5316\uFF0C\u5DF2\u66F4\u65B0\u51B2\u7A81\u8BB0\u5F55\uFF0C\u8BF7\u91CD\u65B0\u68C0\u67E5\u53CC\u65B9\u7248\u672C\u3002");
+      }
+      const local = await this.inspectLocalFile(path);
+      if (local.exists) {
+        await this.executeAction(path, record.remotePath, { action: "upload", reason: "User confirmed merge", isConflict: false }, local, remote);
+      } else if (remote.exists) {
+        await this.client.deleteFile(record.remotePath);
+        this.stateStore.delete(path);
+      } else this.stateStore.delete(path);
+      this.stateStore.clearConflict(path);
+      try {
+        await this.stateStore.save();
+      } catch (error) {
+        this.stateStore.setConflict(record);
+        throw error;
+      }
+      this.setStatus("\u51B2\u7A81\u5DF2\u5904\u7406", false);
+      new import_obsidian4.Notice(`\u51B2\u7A81\u5DF2\u7531\u4EBA\u5DE5\u786E\u8BA4\u5E76\u540C\u6B65\uFF1A${path}`);
+    });
   }
   async inspectLocalFile(vaultPath, cachedFile) {
     const adapter = this.app.vault.adapter;
@@ -2189,8 +2195,54 @@ var SyncEngine = class {
   }
 };
 
+// src/conflicts-ui.ts
+var import_obsidian5 = require("obsidian");
+var ConflictReviewModal = class extends import_obsidian5.Modal {
+  constructor(app, engine) {
+    super(app);
+    this.engine = engine;
+  }
+  onOpen() {
+    this.contentEl.empty();
+    new import_obsidian5.Setting(this.contentEl).setName("\u5F85\u4EBA\u5DE5\u89E3\u51B3\u7684\u540C\u6B65\u51B2\u7A81").setHeading();
+    this.contentEl.createEl("p", { text: "\u539F\u6587\u4EF6\u662F\u672C\u5730\u7248\u672C\uFF0C\u526F\u672C\u662F\u5F53\u65F6\u7684\u7F51\u76D8\u7248\u672C\u3002\u8BF7\u4EBA\u5DE5\u6BD4\u8F83\uFF0C\u628A\u6700\u7EC8\u5185\u5BB9\u5199\u5165\u539F\u6587\u4EF6\uFF0C\u518D\u786E\u8BA4\u63D0\u4EA4\u3002\u82E5\u539F\u6587\u4EF6\u5DF2\u5220\u9664\uFF0C\u786E\u8BA4\u4F1A\u540C\u6B65\u5220\u9664\u7F51\u76D8\u6587\u4EF6\u3002\u672A\u786E\u8BA4\u524D\u6682\u505C\u6B64\u6587\u4EF6\u540C\u6B65\uFF0C\u5176\u4ED6\u6587\u4EF6\u7167\u5E38\u3002" });
+    const conflicts = this.engine.getPendingConflicts();
+    if (!conflicts.length) this.contentEl.createEl("p", { text: "\u6682\u65E0\u5F85\u5904\u7406\u51B2\u7A81\u3002" });
+    for (const record of conflicts) {
+      new import_obsidian5.Setting(this.contentEl).setName(record.path).setDesc(record.remote.exists ? "\u53CC\u65B9\u7248\u672C\u5DF2\u4FDD\u7559\uFF0C\u7B49\u5F85\u4EBA\u5DE5\u786E\u8BA4" : "\u7F51\u76D8\u7AEF\u5DF2\u5220\u9664\uFF0C\u672C\u5730\u7248\u672C\u4FDD\u7559\uFF0C\u7B49\u5F85\u4EBA\u5DE5\u786E\u8BA4").addButton((b) => b.setButtonText("\u6253\u5F00\u539F\u6587\u4EF6").onClick(async () => {
+        if (await this.app.vault.adapter.exists(record.path)) await this.app.workspace.openLinkText(record.path, "", true);
+        else new import_obsidian5.Notice("\u539F\u6587\u4EF6\u5DF2\u5220\u9664\uFF1B\u9700\u8981\u4FDD\u7559\u5185\u5BB9\u65F6\u8BF7\u5148\u624B\u52A8\u6062\u590D\u539F\u6587\u4EF6\u3002\u786E\u8BA4\u89E3\u51B3\u4F1A\u91C7\u7528\u5220\u9664\u3002", 1e4);
+      }));
+      for (const copy of record.copies) {
+        new import_obsidian5.Setting(this.contentEl).setName(copy).addButton((b) => b.setButtonText("\u6253\u5F00\u8FDC\u7AEF\u526F\u672C").onClick(async () => {
+          if (await this.app.vault.adapter.exists(copy)) await this.app.workspace.openLinkText(copy, "", true);
+          else new import_obsidian5.Notice("\u8BE5\u526F\u672C\u4E0D\u5B58\u5728\uFF0C\u8BF7\u5148\u70B9\u51FB\u66F4\u65B0\u8FDC\u7AEF\u526F\u672C\u3002", 1e4);
+        }));
+      }
+      new import_obsidian5.Setting(this.contentEl).setName("\u68C0\u67E5\u8FDC\u7AEF\u6700\u65B0\u7248\u672C").addButton((b) => b.setButtonText("\u66F4\u65B0\u8FDC\u7AEF\u526F\u672C").onClick(async () => {
+        b.setDisabled(true);
+        try {
+          await this.engine.refreshPendingConflict(record.path);
+        } catch (e) {
+          new import_obsidian5.Notice(`\u66F4\u65B0\u5931\u8D25\uFF1A${e.message || String(e)}`, 1e4);
+        }
+        this.onOpen();
+      }));
+      new import_obsidian5.Setting(this.contentEl).setName("\u4EBA\u5DE5\u5904\u7406\u5B8C\u6210\u540E\u63D0\u4EA4").setDesc("\u4EE5\u539F\u6587\u4EF6\u5F53\u524D\u5185\u5BB9\u4F5C\u4E3A\u6700\u7EC8\u7ED3\u679C\uFF1B\u539F\u6587\u4EF6\u4E0D\u5B58\u5728\u5219\u91C7\u7528\u5220\u9664\u3002\u526F\u672C\u4FDD\u7559\u4F9B\u8FFD\u6EAF\uFF0C\u4E0D\u81EA\u52A8\u540C\u6B65\u3002").addButton((b) => b.setButtonText("\u786E\u8BA4\u5DF2\u89E3\u51B3\u5E76\u63D0\u4EA4").setWarning().onClick(async () => {
+        b.setDisabled(true);
+        try {
+          await this.engine.confirmConflictResolved(record.path);
+        } catch (e) {
+          new import_obsidian5.Notice(`\u672A\u5B8C\u6210\u5904\u7406\uFF1A${e.message || String(e)}`, 15e3);
+        }
+        this.onOpen();
+      }));
+    }
+  }
+};
+
 // src/main.ts
-var BaiduNetdiskSyncPlugin = class extends import_obsidian5.Plugin {
+var BaiduNetdiskSyncPlugin = class extends import_obsidian6.Plugin {
   constructor() {
     super(...arguments);
     this.settings = DEFAULT_SETTINGS;
@@ -2222,6 +2274,15 @@ var BaiduNetdiskSyncPlugin = class extends import_obsidian5.Plugin {
       }
     );
     await this.syncEngine.initialize();
+    this.updateStatusBar("\u5C31\u7EEA", false);
+    if (this.syncEngine.getPendingConflicts().length) {
+      new import_obsidian6.Notice(`\u6709 ${this.syncEngine.getPendingConflicts().length} \u4E2A\u540C\u6B65\u51B2\u7A81\u5F85\u4EBA\u5DE5\u5904\u7406\uFF0C\u70B9\u51FB\u72B6\u6001\u680F\u67E5\u770B\u3002`, 15e3);
+    }
+    this.addCommand({
+      id: "review-baidu-conflicts",
+      name: "\u67E5\u770B\u5E76\u4EBA\u5DE5\u89E3\u51B3\u540C\u6B65\u51B2\u7A81",
+      callback: () => this.openConflictReview()
+    });
     this.addRibbonIcon("refresh-cw", "\u767E\u5EA6\u7F51\u76D8\u540C\u6B65", async () => {
       await this.runSync();
     });
@@ -2283,15 +2344,20 @@ var BaiduNetdiskSyncPlugin = class extends import_obsidian5.Plugin {
   updateStatusBar(status, isBusy) {
     if (!this.statusBarItem) return;
     const icon = isBusy ? "\u23F3 " : "\u2601\uFE0F ";
-    this.statusBarItem.setText(`${icon}\u767E\u5EA6\u7F51\u76D8: ${status}`);
+    const pending = this.syncEngine?.getPendingConflicts().length || 0;
+    this.statusBarItem.setText(`${icon}\u767E\u5EA6\u7F51\u76D8: ${status}${pending ? ` \u26A0 \u5F85\u5904\u7406\u51B2\u7A81 ${pending}` : ""}`);
     this.statusBarItem.title = "\u70B9\u51FB\u6267\u884C\u767E\u5EA6\u7F51\u76D8\u540C\u6B65";
     this.statusBarItem.onclick = () => {
-      this.runSync();
+      if (this.syncEngine.getPendingConflicts().length) this.openConflictReview();
+      else this.runSync();
     };
+  }
+  openConflictReview() {
+    new ConflictReviewModal(this.app, this.syncEngine).open();
   }
   async runSync() {
     if (!this.settings.accessToken) {
-      new import_obsidian5.Notice("\u8BF7\u5148\u5728\u8BBE\u7F6E\u4E2D\u914D\u7F6E\u767E\u5EA6\u7F51\u76D8 Access Token\uFF01");
+      new import_obsidian6.Notice("\u8BF7\u5148\u5728\u8BBE\u7F6E\u4E2D\u914D\u7F6E\u767E\u5EA6\u7F51\u76D8 Access Token\uFF01");
       return;
     }
     await this.syncEngine.runFullSync();

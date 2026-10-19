@@ -16,6 +16,7 @@ export interface PluginSettings {
   
   // Sync Behaviors
   autoSync: boolean;
+  uploadConcurrency: number; // 1–3 different files; per-file upload phases remain ordered
   syncIntervalMinutes: number;
   syncOnStartup: boolean;
   syncOnModifyDebounceSeconds: number; // Debounce delay before syncing modified files
@@ -62,9 +63,18 @@ export interface SyncMetadataEntry {
   revision: number;        // monotonically increasing sequence number
 }
 
+export interface PendingConflict {
+  path: string;
+  remotePath: string;
+  copies: string[];
+  remote: { exists: boolean; md5?: string; fsId?: string; mtime?: number };
+  createdAt: number;
+}
+
 export interface SyncStateData {
   version: number;
   lastFullSyncTimestamp: number;
+  conflicts?: Record<string, PendingConflict>;
   files: Record<string, SyncMetadataEntry>;
 }
 
@@ -91,6 +101,7 @@ export interface SyncTask {
 
 export interface SyncResult {
   total: number;
+  skipped: number;
   uploaded: number;
   downloaded: number;
   conflicted: number;

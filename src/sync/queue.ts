@@ -121,3 +121,22 @@ export class DebounceManager {
     this.timers.clear();
   }
 }
+
+/** Bounded workers. On failure stop claiming work and drain every in-flight
+ * operation before rejecting, so a caller cannot release its sync lock early. */
+export async function runBounded<T>(items: readonly T[], concurrency: number,
+  work: (item: T) => Promise<void>): Promise<void> {
+  let cursor = 0;
+  let failed = false;
+  let failure: unknown;
+  const worker = async () => {
+    while (!failed && cursor < items.length) {
+      const item = items[cursor++];
+      try { await work(item); }
+      catch (error) { if (!failed) failure = error; failed = true; }
+    }
+  };
+  const limit = Number.isFinite(concurrency) ? Math.max(1, Math.min(3, Math.floor(concurrency))) : 1;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  if (failed) throw failure;
+}

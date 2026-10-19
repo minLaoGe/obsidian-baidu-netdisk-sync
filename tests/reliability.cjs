@@ -95,26 +95,65 @@ function ok(value, message) { assert.ok(value, message); checks++; }
     d.files.set('.custom/plugins/baidu-sync/sync-state.json', enc.encode('{broken'));
     await assert.rejects(new SyncStateStore(app).load()); checks++;
   }
-  // Encrypted conflicts retain the remote CIPHERTEXT hash for the next cycle.
+  // Concurrent upload checkpoints retain all committed entries, including
+  // changes arriving during an earlier atomic save; recovery preserves JSON.
+  {
+    const d = new Disk(), app = appFor(d), state = new SyncStateStore(app);
+    const entry = name => ({path:name,localMtime:1,localMd5:'a',remoteFsId:name,remoteMtime:1,remoteMd5:'b',lastSyncTime:1});
+    state.set('first.md', entry('first.md'));
+    const first = state.save();
+    state.set('second.md', entry('second.md'));
+    const second = state.save();
+    state.set('third.md', entry('third.md'));
+    await Promise.all([first, second, state.save()]);
+    const diskState = JSON.parse(await d.read('.custom/plugins/baidu-sync/sync-state.json'));
+    assert.deepEqual(Object.keys(diskState.files).sort(), ['first.md','second.md','third.md']); checks++;
+    for (const snapshot of d.snapshots) {
+      const restart = new Disk(); restart.files = new Map(snapshot); restart.dirs = new Set(d.dirs);
+      await new AtomicFileSystem(appFor(restart)).recoverCrashAndCleanStale();
+      const path = '.custom/plugins/baidu-sync/sync-state.json';
+      if (restart.files.has(path)) {
+        const parsed = JSON.parse(await restart.read(path));
+        ok(Object.keys(parsed.files).every(name => ['first.md','second.md','third.md'].includes(name)), 'checkpoint recovery');
+      }
+    }
+  }
+  // Conflicts remain pending across restarts; neither side is auto-overwritten.
   {
     const d = new Disk(), app = appFor(d);
-    const settings = { enableE2EE: true, e2eePassword: 'test-only', conflictStrategy: 'create_conflict_file' };
+    d.files.set('note.md', enc.encode('local'));
+    const settings = { enableE2EE: true, e2eePassword: 'test-only', conflictStrategy: 'keep_remote' };
     const ciphertext = await encryptData(enc.encode('remote').buffer, settings.e2eePassword);
-    const engine = new SyncEngine(app, () => settings, { downloadFile: async () => ciphertext });
-    engine.atomicFs = { atomicWrite: async () => {} };
-    const local = { exists: true, md5: calculateMd5(enc.encode('local')) };
-    const remote = { exists: true, fsId: '1', md5: calculateMd5(ciphertext) };
-    await engine.resolveConflict('note.md', '/note.md', { action: 'conflict' }, local, remote);
-    assert.equal(determineSyncAction(local, remote, engine.stateStore.get('note.md')).action, 'noop'); checks++;
-    for (const strategy of ['create_conflict_file', 'keep_local', 'keep_newer']) {
-      settings.conflictStrategy = strategy; settings.e2eePassword = '';
-      let uploads = 0;
-      engine.atomicFs = { readBinary: async () => enc.encode('secret').buffer };
-      engine.client = { uploadFile: async () => { uploads++; throw Error('must not upload'); } };
-      const missingRemote = strategy === 'create_conflict_file';
-      await assert.rejects(engine.resolveConflict('note.md', '/note.md', { action: 'conflict' }, {...local,mtime:2}, missingRemote ? { exists:false } : {...remote,mtime:1}));
-      assert.equal(uploads, 0); checks++;
-    }
+    let uploads = 0, deletions = 0;
+    const client = {downloadFile:async()=>ciphertext,uploadFile:async()=>{uploads++;return{fsId:'1',md5:'committed'}},deleteFile:async()=>{deletions++}};
+    const engine = new SyncEngine(app, () => settings, client);
+    const local = {exists:true,md5:calculateMd5(enc.encode('local'))};
+    const remote = {exists:true,fsId:'1',md5:calculateMd5(ciphertext)};
+    await engine.resolveConflict('note.md','/note.md',{action:'conflict'},local,remote);
+    assert.equal(uploads,0);assert.equal(deletions,0);assert.equal(await d.read('note.md'),'local');checks+=3;
+    const record=engine.getPendingConflicts()[0];
+    assert.equal(await d.read(record.copies[0]),'remote');assert.equal(engine.stateStore.get('note.md'),undefined);checks+=2;
+    assert.equal(engine.shouldIgnore('note.md'),true);assert.equal(engine.shouldIgnore(record.copies[0]),true);checks+=2;
+    await engine.resolveConflict('note.md','/note.md',{action:'conflict'},local,remote);
+    assert.equal(engine.getPendingConflicts()[0].copies.length,1);checks++;
+    const restarted=new SyncStateStore(app);await restarted.load();assert.equal(restarted.getConflicts().length,1);checks++;
+    // A crash/deleted snapshot can be refreshed without touching the original.
+    await d.remove(record.copies[0]);
+    engine.inspectRemoteFile=async()=>remote;
+    await engine.refreshPendingConflict('note.md');
+    assert.equal(await d.read(engine.getPendingConflicts()[0].copies.at(-1)), 'remote');checks++;
+    // Remote changes again: refresh its copy and refuse the stale confirmation.
+    let latest={...remote,md5:'new-remote'};engine.inspectRemoteFile=async()=>latest;
+    await assert.rejects(engine.confirmConflictResolved('note.md'));
+    assert.equal(uploads,0);assert.equal(engine.getPendingConflicts()[0].copies.length,3);checks+=2;
+    await engine.confirmConflictResolved('note.md');
+    assert.equal(uploads,1);assert.equal(engine.getPendingConflicts().length,0);checks+=2;
+    assert.equal(engine.shouldIgnore(record.copies[0]),true);checks++;
+    const reloaded=new SyncStateStore(app);await reloaded.load();assert.equal(reloaded.getConflicts().length,0);checks++;
+    // Delete/modify conflicts also stay pending, even with an old auto strategy.
+    await engine.resolveConflict('note.md','/note.md',{action:'conflict'},local,{exists:false});
+    assert.equal(uploads,1);assert.equal(await d.read('note.md'),'local');checks+=2;
+    assert.equal(engine.getPendingConflicts()[0].remote.exists,false);checks++;
   }
   // Multiple writer instances share a per-vault lock.
   {

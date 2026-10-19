@@ -1,4 +1,5 @@
 import { requestUrl, RequestUrlParam, RequestUrlResponse } from "obsidian";
+import { Mutex } from "../sync/queue";
 import { RemoteFileInfo } from "../types";
 import { calculateBlockList, calculateMd5 } from "../utils/crypto";
 
@@ -10,6 +11,7 @@ export interface BaiduTokenResponse {
 }
 
 export class BaiduClient {
+  private tokenMutex = new Mutex();
   private appKey: string;
   private secretKey: string;
   private accessToken: string;
@@ -102,46 +104,48 @@ export class BaiduClient {
    * Refresh access token before expiration
    */
   private async ensureFreshToken(): Promise<string> {
-    // If token expires within 5 minutes, refresh
-    const now = Date.now();
-    if (this.refreshToken && this.tokenExpiresAt && this.tokenExpiresAt - now < 300000) {
-      try {
-        const url = "https://openapi.baidu.com/oauth/2.0/token";
-        const body = new URLSearchParams({
-          grant_type: "refresh_token",
-          refresh_token: this.refreshToken,
-          client_id: this.appKey,
-          client_secret: this.secretKey,
-        });
+    return this.tokenMutex.acquire(async () => {
+      // If token expires within 5 minutes, refresh
+      const now = Date.now();
+      if (this.refreshToken && this.tokenExpiresAt && this.tokenExpiresAt - now < 300000) {
+        try {
+          const url = "https://openapi.baidu.com/oauth/2.0/token";
+          const body = new URLSearchParams({
+            grant_type: "refresh_token",
+            refresh_token: this.refreshToken,
+            client_id: this.appKey,
+            client_secret: this.secretKey,
+          });
 
-        const res = await requestUrl({
-          url,
-          method: "POST",
-          headers: {
-            "Content-Type": "application/x-www-form-urlencoded",
-          },
-          body: body.toString(),
-        });
+          const res = await requestUrl({
+            url,
+            method: "POST",
+            headers: {
+              "Content-Type": "application/x-www-form-urlencoded",
+            },
+            body: body.toString(),
+          });
 
-        const data = res.json;
-        if (!data.error && data.access_token) {
-          this.accessToken = data.access_token;
-          this.refreshToken = data.refresh_token || this.refreshToken;
-          this.tokenExpiresAt = Date.now() + (data.expires_in || 2592000) * 1000;
-          if (this.onTokenRefreshed) {
-            await this.onTokenRefreshed({
-              access_token: this.accessToken,
-              refresh_token: this.refreshToken,
-              expires_in: data.expires_in || 2592000,
-              scope: data.scope || "",
-            });
+          const data = res.json;
+          if (!data.error && data.access_token) {
+            this.accessToken = data.access_token;
+            this.refreshToken = data.refresh_token || this.refreshToken;
+            this.tokenExpiresAt = Date.now() + (data.expires_in || 2592000) * 1000;
+            if (this.onTokenRefreshed) {
+              await this.onTokenRefreshed({
+                access_token: this.accessToken,
+                refresh_token: this.refreshToken,
+                expires_in: data.expires_in || 2592000,
+                scope: data.scope || "",
+              });
+            }
           }
+        } catch (err) {
+          console.warn("Failed refreshing Baidu access token:", err);
         }
-      } catch (err) {
-        console.warn("Failed refreshing Baidu access token:", err);
       }
-    }
-    return this.accessToken;
+      return this.accessToken;
+    });
   }
 
   /**
@@ -369,12 +373,25 @@ export class BaiduClient {
 
     const uploadid = precreateData.uploadid;
 
-    // Phase 2: Upload chunks if not rapid-uploaded (return_type 1 means rapid upload hit)
-    if (precreateData.return_type !== 1 && chunks.length > 0) {
-      for (let partseq = 0; partseq < chunks.length; partseq++) {
-        const chunk = chunks[partseq];
-        await this.uploadChunk(remotePath, uploadid, partseq, chunk);
+    // Baidu return_type=1 requires missing parts; return_type=2 is rapid
+    // upload. Never commit an unuploaded block list (previously caused 31500).
+    if (precreateData.return_type === 2) {
+      if (!precreateData.info?.fs_id && !precreateData.fs_id) {
+        throw new Error("Rapid upload response missing committed file metadata");
       }
+      const info = precreateData.info || precreateData;
+      return { fsId: String(info.fs_id), md5: info.md5 || calculateMd5(bytes) };
+    }
+    if (precreateData.return_type !== 1 || !uploadid) {
+      throw new Error("Invalid precreate response: no valid upload session");
+    }
+    const missingParts: number[] = precreateData.block_list;
+    if (!Array.isArray(missingParts) || missingParts.some(index =>
+      !Number.isInteger(index) || index < 0 || index >= chunks.length)) {
+      throw new Error("Invalid precreate missing-block list");
+    }
+    for (const partseq of missingParts) {
+      await this.uploadChunk(remotePath, uploadid, partseq, chunks[partseq]);
     }
 
     // Phase 3: Create (atomic final commit)
@@ -404,6 +421,9 @@ export class BaiduClient {
       );
     }
 
+    if (!createData.fs_id || (createData.size !== undefined && Number(createData.size) !== bytes.length)) {
+      throw new Error("Commit response missing valid file metadata");
+    }
     return {
       fsId: String(createData.fs_id),
       md5: createData.md5 || calculateMd5(bytes),
@@ -445,7 +465,6 @@ export class BaiduClient {
       method: "POST",
       headers: {
         "Content-Type": `multipart/form-data; boundary=${boundary}`,
-        "Content-Length": String(multipartBody.length),
       },
       body: multipartBody.buffer.slice(
         multipartBody.byteOffset,

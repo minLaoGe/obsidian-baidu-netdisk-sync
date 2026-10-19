@@ -5,3 +5,6 @@ dist/
 .trash/
 .DS_Store
 Thumbs.db
+
+# Local live benchmark/runtime observation artifacts
+artifacts/

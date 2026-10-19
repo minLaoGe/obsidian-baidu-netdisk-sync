@@ -2,6 +2,7 @@ import { Notice, Plugin } from "obsidian";
 import { BaiduClient } from "./api/baidu-client";
 import { BaiduSyncSettingTab, DEFAULT_SETTINGS } from "./settings";
 import { SyncEngine } from "./sync/engine";
+import { ConflictReviewModal } from "./conflicts-ui";
 import { PluginSettings } from "./types";
 
 export default class BaiduNetdiskSyncPlugin extends Plugin {
@@ -45,6 +46,13 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
     );
 
     await this.syncEngine.initialize();
+    this.updateStatusBar("就绪", false);
+    if (this.syncEngine.getPendingConflicts().length) {
+      new Notice(`有 ${this.syncEngine.getPendingConflicts().length} 个同步冲突待人工处理，点击状态栏查看。`,15000);
+    }
+    this.addCommand({id:"review-baidu-conflicts",name:"查看并人工解决同步冲突",
+      callback:()=>this.openConflictReview()});
+
 
     // 4. Add Ribbon Icon for quick sync
     this.addRibbonIcon("refresh-cw", "百度网盘同步", async () => {
@@ -126,12 +134,16 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
   public updateStatusBar(status: string, isBusy: boolean) {
     if (!this.statusBarItem) return;
     const icon = isBusy ? "⏳ " : "☁️ ";
-    this.statusBarItem.setText(`${icon}百度网盘: ${status}`);
+    const pending = this.syncEngine?.getPendingConflicts().length || 0;
+    this.statusBarItem.setText(`${icon}百度网盘: ${status}${pending ? ` ⚠ 待处理冲突 ${pending}` : ""}`);
     this.statusBarItem.title = "点击执行百度网盘同步";
     this.statusBarItem.onclick = () => {
-      this.runSync();
+      if (this.syncEngine.getPendingConflicts().length) this.openConflictReview();
+      else this.runSync();
     };
   }
+
+  public openConflictReview() { new ConflictReviewModal(this.app, this.syncEngine).open(); }
 
   public async runSync() {
     if (!this.settings.accessToken) {
