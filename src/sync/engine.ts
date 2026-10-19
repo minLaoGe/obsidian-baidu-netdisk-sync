@@ -620,7 +620,7 @@ export class SyncEngine {
           if(!record) throw new Error("冲突记录已变化，请刷新列表");
           if(side==="local") {await this.commitConflictResolution(path);return;}
           const remote=await this.inspectRemoteFile(record.remotePath);
-          if(remote.exists!==record.remote.exists || remote.md5!==record.remote.md5 || remote.fsId!==record.remote.fsId) {
+          if (remote.exists !== record.remote.exists || (remote.exists && record.remote.exists && remote.md5 !== record.remote.md5)) {
             await this.resolveConflict(path,record.remotePath,{action:"conflict",reason:"Remote changed again",isConflict:true},await this.inspectLocalFile(path),remote);
             throw new Error("远端版本已变化，请检查更新后的冲突再选择");
           }
@@ -659,8 +659,7 @@ export class SyncEngine {
       const record = this.getPendingConflicts().find(c => c.path === path);
       if (!record) return;
       const remote = await this.inspectRemoteFile(record.remotePath);
-      if (remote.exists !== record.remote.exists || remote.md5 !== record.remote.md5 ||
-          remote.fsId !== record.remote.fsId) {
+      if (remote.exists !== record.remote.exists || (remote.exists && record.remote.exists && remote.md5 !== record.remote.md5)) {
         await this.resolveConflict(path, record.remotePath, {action:"conflict",reason:"Remote changed again",isConflict:true},
           await this.inspectLocalFile(path), remote);
         throw new Error("远端又发生了变化，已更新冲突记录，请重新检查双方版本。");

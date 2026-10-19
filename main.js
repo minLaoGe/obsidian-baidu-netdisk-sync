@@ -2555,7 +2555,7 @@ var SyncEngine = class {
               return;
             }
             const remote = await this.inspectRemoteFile(record.remotePath);
-            if (remote.exists !== record.remote.exists || remote.md5 !== record.remote.md5 || remote.fsId !== record.remote.fsId) {
+            if (remote.exists !== record.remote.exists || remote.exists && record.remote.exists && remote.md5 !== record.remote.md5) {
               await this.resolveConflict(path, record.remotePath, { action: "conflict", reason: "Remote changed again", isConflict: true }, await this.inspectLocalFile(path), remote);
               throw new Error("\u8FDC\u7AEF\u7248\u672C\u5DF2\u53D8\u5316\uFF0C\u8BF7\u68C0\u67E5\u66F4\u65B0\u540E\u7684\u51B2\u7A81\u518D\u9009\u62E9");
             }
@@ -2603,7 +2603,7 @@ var SyncEngine = class {
     const record = this.getPendingConflicts().find((c) => c.path === path);
     if (!record) return;
     const remote = await this.inspectRemoteFile(record.remotePath);
-    if (remote.exists !== record.remote.exists || remote.md5 !== record.remote.md5 || remote.fsId !== record.remote.fsId) {
+    if (remote.exists !== record.remote.exists || remote.exists && record.remote.exists && remote.md5 !== record.remote.md5) {
       await this.resolveConflict(
         path,
         record.remotePath,
