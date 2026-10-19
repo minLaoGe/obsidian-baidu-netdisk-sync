@@ -371,7 +371,7 @@ export class SyncEngine {
           await this.stateStore.save();
         }
 
-        this.setStatus(this.getSettings().syncPaused ? "已暂停" : this.getPendingConflicts().length ? "部分文件待人工解决冲突" : "已同步", false);
+        this.setStatus(this.getSettings().syncPaused ? "已暂停" : result.errors.length ? `同步结束，${result.errors.length} 个文件失败` : this.getPendingConflicts().length ? "部分文件待人工解决冲突" : "已同步", false);
         const summary = `${this.interactiveConflictRequests ? "同步已让出执行机会给冲突处理，剩余文件下次继续" : "同步完成"}: 跳过${result.skipped} ↑${result.uploaded} ↓${result.downloaded} ⚠${result.conflicted} ✕${result.deleted}${
           result.errors.length ? ` (失败: ${result.errors.length})` : ""
         }`;

@@ -12,6 +12,8 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
   private statusBarItem!: HTMLElement;
   private autoSyncIntervalId?: number;
   private startupSyncTimeoutId?: number;
+  private mobileProgressNotice?: Notice;
+  private mobileProgressHideId?: number;
 
   async onload() {
     console.log("Loading Baidu Netdisk Sync Plugin...");
@@ -117,6 +119,8 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
   onunload() {
     console.log("Unloading Baidu Netdisk Sync Plugin...");
     this.syncEngine?.dispose();
+    this.mobileProgressNotice?.hide();
+    if (this.mobileProgressHideId !== undefined) window.clearTimeout(this.mobileProgressHideId);
     if (this.startupSyncTimeoutId !== undefined) window.clearTimeout(this.startupSyncTimeoutId);
     if (this.autoSyncIntervalId) {
       window.clearInterval(this.autoSyncIntervalId);
@@ -139,6 +143,22 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
   }
 
   public updateStatusBar(status: string, isBusy: boolean) {
+    if (Platform.isMobile && (isBusy || this.mobileProgressNotice)) {
+      if (this.mobileProgressHideId !== undefined) {
+        window.clearTimeout(this.mobileProgressHideId);
+        this.mobileProgressHideId = undefined;
+      }
+      const text = `百度同步：${status}${isBusy ? "\n请保持 Obsidian 在前台" : ""}`;
+      if (this.mobileProgressNotice) this.mobileProgressNotice.setMessage(text);
+      else this.mobileProgressNotice = new Notice(text, 0);
+      if (!isBusy) {
+        this.mobileProgressHideId = window.setTimeout(() => {
+          this.mobileProgressNotice?.hide();
+          this.mobileProgressNotice = undefined;
+          this.mobileProgressHideId = undefined;
+        }, 8000);
+      }
+    }
     if (!this.statusBarItem) return;
     const icon = isBusy ? "⏳ " : "☁️ ";
     const pending = this.syncEngine?.getPendingConflicts().length || 0;

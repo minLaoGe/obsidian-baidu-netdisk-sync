@@ -2340,7 +2340,7 @@ var SyncEngine = class {
           this.stateStore.setLastFullSyncTimestamp(Date.now());
           await this.stateStore.save();
         }
-        this.setStatus(this.getSettings().syncPaused ? "\u5DF2\u6682\u505C" : this.getPendingConflicts().length ? "\u90E8\u5206\u6587\u4EF6\u5F85\u4EBA\u5DE5\u89E3\u51B3\u51B2\u7A81" : "\u5DF2\u540C\u6B65", false);
+        this.setStatus(this.getSettings().syncPaused ? "\u5DF2\u6682\u505C" : result.errors.length ? `\u540C\u6B65\u7ED3\u675F\uFF0C${result.errors.length} \u4E2A\u6587\u4EF6\u5931\u8D25` : this.getPendingConflicts().length ? "\u90E8\u5206\u6587\u4EF6\u5F85\u4EBA\u5DE5\u89E3\u51B3\u51B2\u7A81" : "\u5DF2\u540C\u6B65", false);
         const summary = `${this.interactiveConflictRequests ? "\u540C\u6B65\u5DF2\u8BA9\u51FA\u6267\u884C\u673A\u4F1A\u7ED9\u51B2\u7A81\u5904\u7406\uFF0C\u5269\u4F59\u6587\u4EF6\u4E0B\u6B21\u7EE7\u7EED" : "\u540C\u6B65\u5B8C\u6210"}: \u8DF3\u8FC7${result.skipped} \u2191${result.uploaded} \u2193${result.downloaded} \u26A0${result.conflicted} \u2715${result.deleted}${result.errors.length ? ` (\u5931\u8D25: ${result.errors.length})` : ""}`;
         new import_obsidian4.Notice(summary + (result.conflicted ? "\uFF1B\u51B2\u7A81\u8BF7\u70B9\u51FB\u72B6\u6001\u680F\u5904\u7406" : ""));
         this.log("info", `${summary}\uFF1B\u603B\u8017\u65F6 ${((Date.now() - startedAt) / 1e3).toFixed(1)}s`);
@@ -3034,6 +3034,8 @@ var BaiduNetdiskSyncPlugin = class extends import_obsidian6.Plugin {
   onunload() {
     console.log("Unloading Baidu Netdisk Sync Plugin...");
     this.syncEngine?.dispose();
+    this.mobileProgressNotice?.hide();
+    if (this.mobileProgressHideId !== void 0) window.clearTimeout(this.mobileProgressHideId);
     if (this.startupSyncTimeoutId !== void 0) window.clearTimeout(this.startupSyncTimeoutId);
     if (this.autoSyncIntervalId) {
       window.clearInterval(this.autoSyncIntervalId);
@@ -3053,6 +3055,22 @@ var BaiduNetdiskSyncPlugin = class extends import_obsidian6.Plugin {
     }
   }
   updateStatusBar(status, isBusy) {
+    if (import_obsidian6.Platform.isMobile && (isBusy || this.mobileProgressNotice)) {
+      if (this.mobileProgressHideId !== void 0) {
+        window.clearTimeout(this.mobileProgressHideId);
+        this.mobileProgressHideId = void 0;
+      }
+      const text = `\u767E\u5EA6\u540C\u6B65\uFF1A${status}${isBusy ? "\n\u8BF7\u4FDD\u6301 Obsidian \u5728\u524D\u53F0" : ""}`;
+      if (this.mobileProgressNotice) this.mobileProgressNotice.setMessage(text);
+      else this.mobileProgressNotice = new import_obsidian6.Notice(text, 0);
+      if (!isBusy) {
+        this.mobileProgressHideId = window.setTimeout(() => {
+          this.mobileProgressNotice?.hide();
+          this.mobileProgressNotice = void 0;
+          this.mobileProgressHideId = void 0;
+        }, 8e3);
+      }
+    }
     if (!this.statusBarItem) return;
     const icon = isBusy ? "\u23F3 " : "\u2601\uFE0F ";
     const pending = this.syncEngine?.getPendingConflicts().length || 0;

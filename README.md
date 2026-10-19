@@ -2,14 +2,14 @@
 
 ## English
 
-A desktop Obsidian plugin for bidirectional sync with Baidu Netdisk. Requires
+An Obsidian plugin for desktop, Android, and iOS for bidirectional sync with Baidu Netdisk. Requires
 **Obsidian 1.14.4+**, a Baidu Netdisk account, and a Baidu developer application.
 
 - **Bounded uploads:** full sync uploads 1–3 independent files concurrently (default 3). Each file retains ordered precreate, missing-block upload, and final commit.
 - **Delta sync:** unchanged files are skipped. Identical-content local save events make no Baidu request. Full sync still checks the remote inventory for edits on other devices.
 - **Human-reviewed conflicts:** keep the local original and remote snapshot, persist a pending record, and pause that file until the user merges and confirms. Notices, a status-bar count, a settings button, and the command palette expose unresolved conflicts.
 - **File safety:** existing atomic desktop replacement, verified backups, crash-recovery journals, serialized state checkpoints, and full/incremental sync isolation remain in place.
-- **Optional encryption:** AES-256-GCM encryption and password-protected configuration transfer between desktop devices.
+- **Optional encryption:** AES-256-GCM encryption and password-protected configuration transfer between devices.
 
 ### Installation
 
@@ -18,7 +18,7 @@ Download `main.js`, `manifest.json`, and `styles.css` from the repository's
 and place them in `<vault>/.obsidian/plugins/baidu-sync/`. Alternatively install with
 BRAT using `minLaoGe/obsidian-baidu-netdisk-sync`. Enable **Baidu Sync Safe** in
 Community plugins. To use unreleased source changes, build the checked-out branch
-and copy those three files to the same directory. This version is desktop-only.
+and copy those three files to the same directory. Mobile defaults to manual sync and shows a persistent progress notice. Keep Obsidian in the foreground during sync. See [mobile setup](MOBILE-INSTALL.zh-CN.md). iOS compatibility has simulation coverage; physical-device testing is pending.
 
 Enter your AppKey and AppSecret in plugin settings, authorize with Baidu, exchange
 the code for a token, test connectivity, and choose the remote directory. Make an
@@ -58,7 +58,7 @@ configuration transfer uses the clipboard only when requested.
 
 ## 中文
 
-使用百度网盘同步 Obsidian 知识库，当前仅支持 **Obsidian 1.14.4 及以上桌面端**。
+使用百度网盘同步 Obsidian 知识库，支持 **Obsidian 1.14.4 及以上桌面端、Android 和 iOS**；手机默认手动同步，并显示持续更新的进度提示。iOS 已通过模拟环境检查，尚未完成真机验证。详见 [手机安装说明](MOBILE-INSTALL.zh-CN.md)。
 
 ### 安装
 
