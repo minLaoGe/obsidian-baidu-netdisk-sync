@@ -1316,14 +1316,14 @@ var BaiduSyncSettingTab = class extends import_obsidian3.PluginSettingTab {
         this.plugin.resetAutoSyncTimer();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("\u4E0A\u4F20\u5E76\u53D1\u6570").setDesc("\u5168\u91CF\u540C\u6B65\u540C\u65F6\u4E0A\u4F20 1\u20133 \u4E2A\u4E0D\u540C\u6587\u4EF6\uFF1B\u5355\u6587\u4EF6\u63D0\u4EA4\u4ECD\u4FDD\u6301\u987A\u5E8F\u3002").addDropdown(
-      (dropdown) => dropdown.addOptions({ "1": "1\uFF08\u4E32\u884C\uFF09", "2": "2", "3": "3\uFF08\u63A8\u8350\uFF09" }).setValue(String(this.plugin.settings.uploadConcurrency || 3)).onChange(async (value) => {
+    new import_obsidian3.Setting(containerEl).setName("\u4E0A\u4F20\u5E76\u53D1\u6570").setDesc("\u5168\u91CF\u540C\u6B65\u540C\u65F6\u4E0A\u4F20 1\u20135 \u4E2A\u4E0D\u540C\u6587\u4EF6\uFF1B\u5355\u6587\u4EF6\u63D0\u4EA4\u4ECD\u4FDD\u6301\u987A\u5E8F\u3002").addDropdown(
+      (dropdown) => dropdown.addOptions({ "1": "1\uFF08\u4E32\u884C\uFF09", "2": "2", "3": "3\uFF08\u63A8\u8350\uFF09", "4": "4", "5": "5\uFF08\u9AD8\u901F\uFF09" }).setValue(String(this.plugin.settings.uploadConcurrency || 3)).onChange(async (value) => {
         this.plugin.settings.uploadConcurrency = Number(value);
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("\u4E0B\u8F7D\u5E76\u53D1\u6570").setDesc("\u5168\u91CF\u540C\u6B65\u540C\u65F6\u62C9\u53D6 1\u20133 \u4E2A\u4E0D\u540C\u6587\u4EF6\uFF1B\u5355\u6587\u4EF6\u5199\u76D8\u4E92\u65A5\u4E0E\u9632\u8986\u76D6\u51B2\u7A81\u4FDD\u62A4\u4ECD\u4FDD\u6301\u987A\u5E8F\u3002").addDropdown(
-      (dropdown) => dropdown.addOptions({ "1": "1\uFF08\u4E32\u884C\uFF09", "2": "2", "3": "3\uFF08\u63A8\u8350\uFF09" }).setValue(String(this.plugin.settings.downloadConcurrency || this.plugin.settings.uploadConcurrency || 3)).onChange(async (value) => {
+    new import_obsidian3.Setting(containerEl).setName("\u4E0B\u8F7D\u5E76\u53D1\u6570").setDesc("\u5168\u91CF\u540C\u6B65\u540C\u65F6\u62C9\u53D6 1\u20135 \u4E2A\u4E0D\u540C\u6587\u4EF6\uFF1B\u5355\u6587\u4EF6\u5199\u76D8\u4E92\u65A5\u4E0E\u9632\u8986\u76D6\u51B2\u7A81\u4FDD\u62A4\u4ECD\u4FDD\u6301\u987A\u5E8F\u3002").addDropdown(
+      (dropdown) => dropdown.addOptions({ "1": "1\uFF08\u4E32\u884C\uFF09", "2": "2", "3": "3\uFF08\u63A8\u8350\uFF09", "4": "4", "5": "5\uFF08\u9AD8\u901F\uFF09" }).setValue(String(this.plugin.settings.downloadConcurrency || this.plugin.settings.uploadConcurrency || 3)).onChange(async (value) => {
         this.plugin.settings.downloadConcurrency = Number(value);
         await this.plugin.saveSettings();
       })
@@ -2577,8 +2577,8 @@ var SyncEngine = class {
           }
         }
         if (acceptedIdentical) await this.stateStore.save();
-        const uploadConcurrency = Math.max(1, Math.min(3, Math.floor(settings.uploadConcurrency || 3)));
-        const downloadConcurrency = Math.max(1, Math.min(3, Math.floor(settings.downloadConcurrency || settings.uploadConcurrency || 3)));
+        const uploadConcurrency = Math.max(1, Math.min(5, Math.floor(settings.uploadConcurrency || 3)));
+        const downloadConcurrency = Math.max(1, Math.min(5, Math.floor(settings.downloadConcurrency || settings.uploadConcurrency || 3)));
         if (uploads.length) this.log("info", `\u4E0A\u4F20\u8BA1\u5212: ${uploads.length} \u4E2A\u6587\u4EF6\uFF0C\u5E76\u53D1 ${uploadConcurrency}`);
         if (downloads.length) this.log("info", `\u4E0B\u8F7D\u8BA1\u5212: ${downloads.length} \u4E2A\u6587\u4EF6\uFF0C\u5E76\u53D1 ${downloadConcurrency}`);
         if (uploads.length) await this.client.createDirectory(settings.remoteBasePath);

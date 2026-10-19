@@ -393,8 +393,8 @@ export class SyncEngine {
           }
         }
         if (acceptedIdentical) await this.stateStore.save();
-        const uploadConcurrency = Math.max(1, Math.min(3, Math.floor(settings.uploadConcurrency || 3)));
-        const downloadConcurrency = Math.max(1, Math.min(3, Math.floor(settings.downloadConcurrency || settings.uploadConcurrency || 3)));
+        const uploadConcurrency = Math.max(1, Math.min(5, Math.floor(settings.uploadConcurrency || 3)));
+        const downloadConcurrency = Math.max(1, Math.min(5, Math.floor(settings.downloadConcurrency || settings.uploadConcurrency || 3)));
         if (uploads.length) this.log("info", `上传计划: ${uploads.length} 个文件，并发 ${uploadConcurrency}`);
         if (downloads.length) this.log("info", `下载计划: ${downloads.length} 个文件，并发 ${downloadConcurrency}`);
         if (uploads.length) await this.client.createDirectory(settings.remoteBasePath);
