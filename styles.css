@@ -59,3 +59,9 @@
 .baidu-sync-log-success { color: var(--text-success, #48c774); }
 .baidu-sync-log-warn { color: var(--text-warning, #ffdd57); }
 .baidu-sync-log-error { color: var(--text-error, #f14668); }
+
+.baidu-merge-modal { width: min(1100px, 95vw); }
+.baidu-merge-diff { max-height: 30vh; overflow: auto; white-space: pre-wrap; padding: 12px; background: var(--background-secondary); }
+.baidu-merge-removed { background: rgba(220,60,60,.15); }
+.baidu-merge-added { background: rgba(40,180,90,.15); }
+.baidu-merge-editor { width: 100%; min-height: 32vh; font-family: var(--font-monospace); white-space: pre; }

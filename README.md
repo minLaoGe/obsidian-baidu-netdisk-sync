@@ -28,8 +28,8 @@ nonempty password on every device.
 ### Manual conflict resolution
 
 1. Open pending conflicts from the status bar, settings, or **查看并人工解决同步冲突** command.
-2. Compare the original with its `.conflict-...` remote snapshot; merge the chosen content into the original.
-3. Click **确认已解决并提交**. If the original is absent, this explicitly applies its deletion remotely.
+2. Use **比较并合并** to review the line diff and edit one merged result. **保存并解决冲突** saves and commits it, removing the pending record on success.
+3. Alternatively, select conflicts and accept their local or remote versions in a batch. For edits made directly in the original, click **确认已解决并提交**; an absent original explicitly applies deletion remotely.
 
 The remote is checked again before committing. New remote edits refresh the pending
 snapshot and block stale confirmation. **更新远端副本** repairs a missing snapshot
@@ -59,22 +59,6 @@ configuration transfer uses the clipboard only when requested.
 ## 中文
 
 使用百度网盘同步 Obsidian 知识库，当前仅支持 **Obsidian 1.14.4 及以上桌面端**。
-
-### 新增功能与修复
-
-| 功能 | 行为 |
-| --- | --- |
-| 1–3 并发上传 | 默认 3 个不同文件并发；同一文件的分片和最终提交保持顺序 |
-| 差异同步 | 内容未变不上传、不下载；重复保存不请求百度接口 |
-| 减少无效操作 | 整轮无变化时不重复创建根目录、不重写同步基线；仍检查远端列表 |
-| 人工冲突处理 | 保留双方版本、持久化待办、暂停冲突文件，不自动选择覆盖方 |
-| 明确冲突提示 | 弹出提示、状态栏待处理数量、设置入口、命令面板入口 |
-| 原子性保护 | 分片失败不提交；成功后原子保存基线；保存失败时停止派发并等待在途任务结束 |
-| 上传协议修复 | 修正秒传判断，解决 `31500`；移除受限制请求头，解决桌面端 `ERR_INVALID_ARGUMENT` |
-
-首次上传仍需传完所有待同步文件，后续才可根据基线跳过未修改内容。
-自动本地修改任务保持顺序；上传并发针对全量同步中的独立文件。下载、删除、
-冲突处理和本地原子替换保持串行。令牌刷新也串行处理。
 
 ### 安装
 
@@ -136,8 +120,8 @@ configuration transfer uses the clipboard only when requested.
 ### 人工解决冲突
 
 1. 出现提示后，点击状态栏的“待处理冲突”，或在设置/命令面板打开冲突列表。
-2. 打开本地原文件与远端副本，人工比较，把最终内容合并到原文件。
-3. 点击“确认已解决并提交”。**若原文件不存在，确认会将删除同步到网盘。**
+2. 点击“比较并合并”，查看逐行 diff 并编辑合并结果；点击“保存并解决冲突”后自动提交，成功即从列表移除。也可勾选冲突，批量接受本地或远端版本。
+3. 若直接在原文件中完成编辑，点击“确认已解决并提交”。**若原文件不存在，确认会将删除同步到网盘。**
 4. 远端再次变化时会阻止旧确认，更新副本后请重新检查；缺失副本可通过“更新远端副本”补取。
 
 未确认前不推进该文件的同步基线，不上传冲突副本；其他文件正常同步。待办在重启后仍保留，
@@ -146,7 +130,7 @@ configuration transfer uses the clipboard only when requested.
 
 ### 验证与边界
 
-生产构建、TypeScript 检查、104 项可靠性断言及并发、差异同步、上传协议测试通过。
+生产构建、TypeScript 检查、138 项可靠性断言及并发、差异同步、上传协议测试通过。
 覆盖崩溃恢复、磁盘故障、待处理冲突重启恢复、远端再次修改、缺失副本重建、
 失败上传不提交、成功提交后再更新状态等场景。
 
@@ -181,3 +165,21 @@ node tests/benchmark-live.cjs /absolute/path/to/plugin/data.json --large-only
 对端到端加密与配置迁移设计提供的参考。本插件安装地址为上方 minLaoGe 仓库。
 
 [MIT License](LICENSE)。
+
+## Directory enumeration and deletion safety fix
+
+Baidu `method=list` ignores the recursion flag. The plugin now explicitly enumerates every subdirectory and follows full pages even when `has_more` is omitted. Missing child directories, malformed responses, repeated pages and out-of-directory entries abort the scan before applying any plan. All deletion propagation now awaits manual confirmation. Atomic write locks are shared across module copies in one renderer; only a fully cleaned stale journal entry may be skipped, while orphan payloads remain blocked and preserved. “暂停所有同步” blocks full, scheduled, local-change sync and resolution commits.
+
+## 相同版本去重
+
+生成冲突副本前会校验实际内容与修改时间。内容哈希一致且修改时间在百度网盘的秒级精度下相同，则保留原文件并更新同步基线，不重复上传或创建冲突副本。时间缺失、时间不同或内容不同不适用此规则。对已登记冲突，点击“更新远端副本”会重新校验；满足条件时清除待办，内容相同的重复副本移入本地回收站，修改过的副本保留。
+
+冲突页面的“打开原文件/远端副本”会在 Obsidian 内部标签页打开并聚焦笔记。原文件和副本均提供删除按钮，二次确认后移入本地回收站；此操作不修改网盘，也不会自动清除待处理状态。删除原文件后，需要另行明确确认提交，才会将删除同步到远端。
+
+点击“比较并合并”可查看逐行增删 diff，在同一个编辑框中按 Git 风格冲突标记人工合并，或采用任一方内容。没有历史正文基线，因此不自动执行三方合并。保存使用原子写入，并检查打开比较后双方快照是否变化；未清除冲突标记时不能保存或提交。仅支持不超过 2 MB 的 UTF-8 文本。备份副本保留供恢复，最终合并内容写入原文件，点击“保存并解决冲突”后自动提交同步。
+
+合并编辑器的“保存并解决冲突”会原子保存原文件，检查远端版本并提交，成功后自动从冲突列表移除，无需再次确认；提交失败或远端有新变化则保留待办和已保存内容。
+
+冲突列表支持逐项勾选、全选，再批量接受所选本地或远端版本。确认窗口说明覆盖和删除方向；逐项提交，成功项移出列表，失败项保留并显示原因。接受远端前备份被替换的本地内容，远端再次变化时拒绝覆盖并要求重新检查。
+
+批量冲突操作会等待当前文件安全完成，并让全量扫描/后续传输让出执行机会；不使用不完整的远端清单作删除判断。窗口显示等待状态和逐项进度，关闭窗口不取消已经提交的任务。

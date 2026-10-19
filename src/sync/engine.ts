@@ -1,7 +1,8 @@
+import { hasConflictMarkers } from "./merge";
 import { App, Notice, TAbstractFile, TFile } from "obsidian";
 import { BaiduClient } from "../api/baidu-client";
 import { decryptData, encryptData, isEncrypted } from "../crypto/e2ee";
-import { ConflictDecision, determineSyncAction, FileStateInspection, generateConflictPath } from "./conflict";
+import { ConflictDecision, determineSyncAction, FileStateInspection, generateConflictPath, sameFileVersion } from "./conflict";
 import { DebounceManager, FifoQueue, Mutex, runBounded } from "./queue";
 import { SyncStateStore } from "./state";
 import { PendingConflict, ConflictStrategy, PluginSettings, RemoteFileInfo, SyncLogEntry, SyncResult } from "../types";
@@ -14,6 +15,7 @@ export class SyncEngine {
   private stateStore: SyncStateStore;
   private client: BaiduClient;
   private syncMutex: Mutex = new Mutex();
+  private interactiveConflictRequests=0;
   private taskQueue: FifoQueue = new FifoQueue();
   private debounceManager: DebounceManager = new DebounceManager();
   private isSyncing: boolean = false;
@@ -116,6 +118,7 @@ export class SyncEngine {
    * Register local vault file modification with debounce for ordering
    */
   public handleLocalFileModified(file: TAbstractFile): void {
+    if (this.getSettings().syncPaused) return;
     if (!(file instanceof TFile)) return;
     if (this.shouldIgnore(file.path)) return;
 
@@ -131,6 +134,7 @@ export class SyncEngine {
    * Register local vault file deletion with debounce
    */
   public handleLocalFileDeleted(file: TAbstractFile): void {
+    if (this.getSettings().syncPaused) return;
     if (this.shouldIgnore(file.path)) return;
 
     this.debounceManager.debounce(file.path, 1000, () => {
@@ -149,7 +153,7 @@ export class SyncEngine {
     return this.syncMutex.acquire(async () => {
       try {
         const settings = this.getSettings();
-        if (!settings.accessToken) return;
+        if (!settings.accessToken || settings.syncPaused) return;
 
         const remotePath = toRemotePath(settings.remoteBasePath, vaultPath);
         const base = this.stateStore.get(vaultPath);
@@ -164,7 +168,10 @@ export class SyncEngine {
 
         const decision = determineSyncAction(localInspection, remoteInspection, base);
 
-        if (decision.action === "noop") return;
+        if (decision.action === "noop") {
+          if (this.rememberIdenticalVersion(vaultPath,localInspection,remoteInspection,base)) await this.stateStore.save();
+          return;
+        }
         await this.executeAction(vaultPath, remotePath, decision, localInspection, remoteInspection, base);
         await this.stateStore.save();
       } catch (err: any) {
@@ -189,6 +196,7 @@ export class SyncEngine {
       };
 
       const settings = this.getSettings();
+      if (settings.syncPaused) { this.setStatus("已暂停",false); return result; }
       if (!settings.accessToken) {
         new Notice("百度网盘同步：请先在设置中填写并授权 Access Token！");
         return result;
@@ -210,7 +218,7 @@ export class SyncEngine {
 
         // 2. Gather all remote files
         this.setStatus("获取网盘文件列表...", true);
-        const remoteList = await this.client.listFiles(settings.remoteBasePath, true);
+        const remoteList = await this.client.listFiles(settings.remoteBasePath, true,()=>this.interactiveConflictRequests>0);
         const remoteMap: Map<string, RemoteFileInfo> = new Map();
         for (const rItem of remoteList) {
           if (rItem.isdir === 1) continue;
@@ -236,7 +244,9 @@ export class SyncEngine {
         const uploads: Array<() => Promise<void>> = [];
         const serial: Array<() => Promise<void>> = [];
         let completed = 0;
+        let acceptedIdentical = false;
         for (const path of allPaths) {
+          if(this.interactiveConflictRequests) break;
           this.setStatus(`检查文件 (${uploads.length + serial.length + completed + 1}/${allPaths.size})`, true);
           try {
             if (this.shouldIgnore(path)) { completed++; result.skipped++; continue; }
@@ -250,8 +260,12 @@ export class SyncEngine {
                   size: remoteItem.size, fsId: remoteItem.fsId }
               : { exists: false };
             let decision = determineSyncAction(localInspection, remoteInspection, base);
-            if (decision.action === "noop") { completed++; result.skipped++; continue; }
+            if (decision.action === "noop") {
+              acceptedIdentical = this.rememberIdenticalVersion(path,localInspection,remoteInspection,base) || acceptedIdentical;
+              completed++; result.skipped++; continue;
+            }
             const work = async () => {
+              if (this.getSettings().syncPaused || this.interactiveConflictRequests) return;
               const itemStarted = Date.now();
               const wasUpload = decision.action === "upload";
               try {
@@ -266,7 +280,8 @@ export class SyncEngine {
                 if (decision.action !== "noop") {
                   await this.executeAction(path, remotePath, decision, localInspection, remoteInspection, base);
 
-                  if (decision.action === "upload") {
+                  if ((decision.action as string) === "noop") { result.skipped++; }
+                  else if (decision.action === "upload") {
                     result.uploaded++;
                     this.log("success", `上传成功: ${path}`);
                   } else if (decision.action === "download") {
@@ -302,9 +317,10 @@ export class SyncEngine {
             result.errors.push({ path, error: itemErr.message || String(itemErr) });
           }
         }
+        if (acceptedIdentical) await this.stateStore.save();
         const concurrency = Math.max(1, Math.min(3, Math.floor(settings.uploadConcurrency || 3)));
         this.log("info", `上传计划: ${uploads.length} 个文件，并发 ${concurrency}`);
-        if (uploads.length || serial.length) await this.client.createDirectory(settings.remoteBasePath);
+        if (uploads.length) await this.client.createDirectory(settings.remoteBasePath);
         await runBounded(uploads, concurrency, work => work());
         for (const work of serial) await work();
 
@@ -314,13 +330,18 @@ export class SyncEngine {
           await this.stateStore.save();
         }
 
-        this.setStatus(this.getPendingConflicts().length ? "部分文件待人工解决冲突" : "已同步", false);
-        const summary = `同步完成: 跳过${result.skipped} ↑${result.uploaded} ↓${result.downloaded} ⚠${result.conflicted} ✕${result.deleted}${
+        this.setStatus(this.getSettings().syncPaused ? "已暂停" : this.getPendingConflicts().length ? "部分文件待人工解决冲突" : "已同步", false);
+        const summary = `${this.interactiveConflictRequests ? "同步已让出执行机会给冲突处理，剩余文件下次继续" : "同步完成"}: 跳过${result.skipped} ↑${result.uploaded} ↓${result.downloaded} ⚠${result.conflicted} ✕${result.deleted}${
           result.errors.length ? ` (失败: ${result.errors.length})` : ""
         }`;
         new Notice(summary);
         this.log("info", `${summary}；总耗时 ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
       } catch (err: any) {
+        if(err.message==="SYNC_YIELD_FOR_CONFLICT") {
+          this.log("info","全量扫描已安全让出执行机会给冲突处理；未使用不完整目录执行同步");
+          this.setStatus("正在处理所选冲突",true);
+          return result;
+        }
         this.log("error", "全量同步过程异常退出", err.message || String(err));
         new Notice(`百度网盘同步错误: ${err.message || String(err)}`);
         this.setStatus("同步出错", false);
@@ -427,6 +448,16 @@ export class SyncEngine {
     }
   }
 
+  private rememberIdenticalVersion(path: string, local: FileStateInspection,
+    remote: FileStateInspection, base?: any): boolean {
+    if (!sameFileVersion(local,remote) || !remote.fsId) return false;
+    if (base?.localMd5 === local.md5 && base?.remoteMd5 === remote.md5 &&
+        base?.remoteFsId === remote.fsId) return false;
+    this.stateStore.set(path,{path,localMtime:local.mtime!,localMd5:local.md5!,
+      remoteFsId:remote.fsId,remoteMtime:remote.mtime!,remoteMd5:remote.md5!,lastSyncTime:Date.now()});
+    return true;
+  }
+
   public getPendingConflicts(): PendingConflict[] { return this.stateStore.getConflicts?.() || []; }
 
   /** Keep the original and the remote snapshot; never advance the baseline or
@@ -435,8 +466,6 @@ export class SyncEngine {
     decision: ConflictDecision, local: FileStateInspection, remote: FileStateInspection,
     base?: any): Promise<void> {
     const existing = this.getPendingConflicts().find(c => c.path === localPath);
-    if (existing && existing.remote.md5 === remote.md5 && existing.remote.fsId === remote.fsId && existing.remote.exists === remote.exists &&
-        (!remote.exists || (existing.copies.length && await this.app.vault.adapter.exists(existing.copies[existing.copies.length - 1])))) return;
     let data: ArrayBuffer | undefined;
     let copyPath: string | undefined;
     if (remote.exists) {
@@ -447,6 +476,33 @@ export class SyncEngine {
         if (!settings.e2eePassword) throw new Error("无法解密远端冲突副本");
         data = await decryptData(data, settings.e2eePassword);
       }
+      // Server-reported hashes may differ from plaintext hashes. Verify the
+      // downloaded/decrypted bytes against a fresh local read before deduping.
+      const current = await this.inspectLocalFile(localPath);
+      const plaintextMd5 = calculateMd5(data);
+      if (sameFileVersion(current,{...remote,md5:plaintextMd5})) {
+        this.stateStore.set(localPath,{path:localPath,localMtime:current.mtime!,localMd5:current.md5!,
+          remoteFsId:remote.fsId,remoteMtime:remote.mtime!,remoteMd5:remote.md5 || plaintextMd5,lastSyncTime:Date.now()});
+        if (existing) this.stateStore.clearConflict(localPath);
+        try { await this.stateStore.save(); }
+        catch (error) { if (existing) this.stateStore.setConflict(existing); throw error; }
+        for (const copy of existing?.copies || []) {
+          if (await this.app.vault.adapter.exists(copy)) {
+            const bytes = await this.atomicFs.readBinary(copy);
+            if (calculateMd5(bytes) === plaintextMd5) {
+              try { await this.atomicFs.safeDelete(copy); }
+              catch { this.log("warn",`已去除冲突标记；重复副本保留待手动清理: ${copy}`); }
+            }
+          }
+        }
+        decision.action="noop";decision.isConflict=false;
+        this.setStatus("相同版本已合并",false);
+        this.log("info",`内容及修改时间相同，保留原文件: ${localPath}`);
+        return;
+      }
+      if (existing && existing.remote.md5 === remote.md5 && existing.remote.fsId === remote.fsId &&
+          existing.remote.exists === remote.exists && existing.copies.length &&
+          await this.app.vault.adapter.exists(existing.copies[existing.copies.length-1])) return;
       copyPath = generateConflictPath(localPath);
       while (await this.app.vault.adapter.exists(copyPath)) copyPath = generateConflictPath(localPath);
     }
@@ -463,6 +519,50 @@ export class SyncEngine {
     new Notice(`百度同步发现冲突：${localPath}。已暂停此文件同步，请打开“待处理冲突”人工合并并确认。`, 15000);
   }
 
+  public async readConflictMerge(path: string) {
+    const record=this.getPendingConflicts().find(c=>c.path===path);
+    if (!record) throw new Error("冲突记录已变化，请重新打开");
+    if (!/\.(md|markdown|txt|json|csv|yaml|yml|xml|html|css|js|ts|log)$/i.test(path)) throw new Error("二进制文件不支持文本合并，请选择保留版本");
+    const read=async(p:string):Promise<string|null>=> {
+      if (!(await this.app.vault.adapter.exists(p))) return null;
+      const bytes=await this.atomicFs.readBinary(p);
+      if(bytes.byteLength>2*1024*1024) throw new Error("文件超过 2 MB，请在编辑器中手动处理");
+      const text=new TextDecoder("utf-8",{fatal:true}).decode(bytes);
+      if(text.includes("\0")) throw new Error("二进制内容不支持文本合并");
+      return text;
+    };
+    const local=await read(path);
+    const copy=record.copies[record.copies.length-1];
+    const remote=record.remote.exists ? (copy ? await read(copy) : null) : null;
+    if(record.remote.exists && remote===null) throw new Error("远端副本缺失，请先更新远端副本");
+    return {local,remote,signature:JSON.stringify(record)};
+  }
+
+  public async saveConflictMerge(path:string, expected:{local:string|null;remote:string|null;signature:string}, text:string):Promise<void> {
+    return this.syncMutex.acquire(async()=>{
+      if(hasConflictMarkers(text)) throw new Error("请先处理所有冲突标记，再保存合并结果");
+      const current=await this.readConflictMerge(path);
+      if(JSON.stringify(current)!==JSON.stringify(expected)) throw new Error("文件或冲突版本已变化，请重新打开比较，避免覆盖新修改");
+      const data=new TextEncoder().encode(text).buffer;
+      await this.atomicFs.atomicWrite(path,data,calculateMd5(data));
+      try { await this.commitConflictResolution(path); }
+      catch(e:any) { throw new Error(`合并内容已保存，但提交未完成，冲突仍保留：${e.message || String(e)}`); }
+    });
+  }
+
+  public async trashConflictFile(conflictPath: string, target: string): Promise<void> {
+    return this.syncMutex.acquire(async()=>{
+      const record=this.getPendingConflicts().find(c=>c.path===conflictPath);
+      if (!record || (target!==record.path && !record.copies.includes(target))) {
+        throw new Error("只能删除当前冲突登记的原文件或副本");
+      }
+      if (!(await this.app.vault.adapter.exists(target))) throw new Error("文件不存在或已经移入回收站");
+      await this.atomicFs.safeDelete(target);
+      this.log("info",`冲突文件已移入本地回收站（未修改网盘）: ${target}`);
+      new Notice("已移入本地回收站，网盘文件未改动。");
+    });
+  }
+
   public async refreshPendingConflict(path: string): Promise<void> {
     return this.syncMutex.acquire(async () => {
       const record = this.getPendingConflicts().find(c => c.path === path);
@@ -472,8 +572,56 @@ export class SyncEngine {
     });
   }
 
+  public async acceptConflictVersions(paths:string[], side:"local"|"remote", progress?:(done:number,total:number,path:string)=>void) {
+    this.interactiveConflictRequests++;
+    const selected=[...new Set(paths)];
+    try {
+    const resolved:string[]=[], failed:{path:string;message:string}[]=[];
+    progress?.(0,selected.length,"");
+    for(const path of selected) {
+      try {
+        await this.syncMutex.acquire(async()=>{
+          if(this.getSettings().syncPaused) throw new Error("同步已暂停");
+          const record=this.getPendingConflicts().find(c=>c.path===path);
+          if(!record) throw new Error("冲突记录已变化，请刷新列表");
+          if(side==="local") {await this.commitConflictResolution(path);return;}
+          const remote=await this.inspectRemoteFile(record.remotePath);
+          if(remote.exists!==record.remote.exists || remote.md5!==record.remote.md5 || remote.fsId!==record.remote.fsId) {
+            await this.resolveConflict(path,record.remotePath,{action:"conflict",reason:"Remote changed again",isConflict:true},await this.inspectLocalFile(path),remote);
+            throw new Error("远端版本已变化，请检查更新后的冲突再选择");
+          }
+          const local=await this.inspectLocalFile(path);
+          // Preserve the replaced local version before accepting remote bytes/deletion.
+          if(local.exists) {
+            const bytes=await this.atomicFs.readBinary(path);
+            let backup=generateConflictPath(path);
+            while(await this.app.vault.adapter.exists(backup)) backup=generateConflictPath(path);
+            const updated={...record,copies:[...record.copies,backup]};
+            this.stateStore.setConflict(updated);
+            await this.stateStore.save();
+            await this.atomicFs.atomicWrite(backup,bytes,calculateMd5(bytes));
+          }
+          if(remote.exists) await this.executeAction(path,record.remotePath,{action:"download",reason:"User accepted remote",isConflict:false},local,remote);
+          else {if(local.exists) await this.atomicFs.safeDelete(path);this.stateStore.delete(path);}
+          const pending=this.getPendingConflicts().find(c=>c.path===path)!;
+          this.stateStore.clearConflict(path);
+          try {await this.stateStore.save();} catch(e) {this.stateStore.setConflict(pending);throw e;}
+          this.setStatus("冲突已处理",false);
+        });
+        resolved.push(path);
+      } catch(e:any) {failed.push({path,message:e.message || String(e)});}
+      progress?.(resolved.length+failed.length,selected.length,path);
+    }
+    return {resolved,failed};
+    } finally {this.interactiveConflictRequests--;}
+  }
+
   public async confirmConflictResolved(path: string): Promise<void> {
-    return this.syncMutex.acquire(async () => {
+    return this.syncMutex.acquire(()=>this.commitConflictResolution(path));
+  }
+
+  private async commitConflictResolution(path:string):Promise<void> {
+      if (this.getSettings().syncPaused) throw new Error("同步已暂停，请先在设置中解除暂停");
       const record = this.getPendingConflicts().find(c => c.path === path);
       if (!record) return;
       const remote = await this.inspectRemoteFile(record.remotePath);
@@ -485,6 +633,11 @@ export class SyncEngine {
       }
       const local = await this.inspectLocalFile(path);
       if (local.exists) {
+        if (/\.(md|markdown|txt|json|csv|yaml|yml|xml|html|css|js|ts|log)$/i.test(path)) {
+          const text=new TextDecoder().decode(await this.atomicFs.readBinary(path));
+          if(hasConflictMarkers(text)) throw new Error("原文件仍有冲突标记，请先完成合并");
+        }
+        if (!remote.exists) await this.client.createDirectory(this.getSettings().remoteBasePath);
         await this.executeAction(path, record.remotePath, {action:"upload",reason:"User confirmed merge",isConflict:false},local,remote);
       } else if (remote.exists) {
         await this.client.deleteFile(record.remotePath);
@@ -496,8 +649,7 @@ export class SyncEngine {
       // Snapshot copies remain excluded even after resolution; never upload
       // archived remote versions as new notes.
       this.setStatus("冲突已处理", false);
-      new Notice(`冲突已由人工确认并同步：${path}`);
-    });
+      new Notice(`冲突已解决并同步，已从列表移除：${path}`);
   }
 
   private async inspectLocalFile(vaultPath: string, cachedFile?: TFile): Promise<FileStateInspection> {

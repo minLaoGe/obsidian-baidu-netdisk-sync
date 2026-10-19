@@ -431,48 +431,52 @@ var BaiduClient = class {
   /**
    * List files under remote directory (supports recursion and pagination)
    */
-  async listFiles(dirPath, recursion = true) {
+  async listFiles(dirPath, recursion = true, shouldYield) {
     const token = await this.ensureFreshToken();
-    const result = [];
-    let start = 0;
+    const root = dirPath.replace(/\/$/, "") || "/";
+    const directories = [root];
+    const visited = /* @__PURE__ */ new Set();
+    const result = /* @__PURE__ */ new Map();
     const limit = 1e3;
-    let hasMore = true;
-    while (hasMore) {
-      const url = `https://pan.baidu.com/rest/2.0/xpan/file?method=list&dir=${encodeURIComponent(
-        dirPath
-      )}&recursion=${recursion ? 1 : 0}&start=${start}&limit=${limit}&web=1&access_token=${token}`;
-      const res = await (0, import_obsidian.requestUrl)({
-        url,
-        method: "GET"
-      });
-      const data = res.json;
-      if (data.errno === -9) {
-        return [];
-      }
-      if (data.errno !== 0) {
-        throw new Error(`Baidu list error (errno: ${data.errno}) for dir "${dirPath}"`);
-      }
-      if (Array.isArray(data.list)) {
+    for (let cursor = 0; cursor < directories.length; cursor++) {
+      const directory = directories[cursor];
+      if (visited.has(directory)) continue;
+      visited.add(directory);
+      let start = 0;
+      const pages = /* @__PURE__ */ new Set();
+      while (true) {
+        if (shouldYield?.()) throw new Error("SYNC_YIELD_FOR_CONFLICT");
+        const url = `https://pan.baidu.com/rest/2.0/xpan/file?method=list&dir=${encodeURIComponent(directory)}&start=${start}&limit=${limit}&web=1&access_token=${token}`;
+        const data = (await (0, import_obsidian.requestUrl)({ url, method: "GET" })).json;
+        if (data.errno === -9 && directory === root && start === 0) return [];
+        if (data.errno !== 0 || !Array.isArray(data.list)) {
+          throw new Error(`\u8FDC\u7AEF\u76EE\u5F55\u679A\u4E3E\u4E0D\u5B8C\u6574\uFF0C\u5DF2\u505C\u6B62\u540C\u6B65: ${directory} (errno: ${data.errno})`);
+        }
+        const signature = JSON.stringify(data.list.map((item) => item.path));
+        if (data.list.length && pages.has(signature)) throw new Error("\u8FDC\u7AEF\u5206\u9875\u91CD\u590D\uFF0C\u5DF2\u505C\u6B62\u540C\u6B65\u4EE5\u9632\u6B62\u8BEF\u5224\u5220\u9664");
+        pages.add(signature);
         for (const item of data.list) {
-          result.push({
+          const prefix = directory === "/" ? "/" : directory + "/";
+          if (typeof item.path !== "string" || !item.path.startsWith(prefix) || !item.path.slice(prefix.length) || item.path.slice(prefix.length).includes("/")) {
+            throw new Error("\u8FDC\u7AEF\u76EE\u5F55\u8FD4\u56DE\u4E86\u8D8A\u754C\u6587\u4EF6\uFF0C\u5DF2\u505C\u6B62\u540C\u6B65");
+          }
+          result.set(item.path, {
             fsId: String(item.fs_id),
             path: item.path,
             serverFilename: item.server_filename,
             size: Number(item.size || 0),
             md5: item.md5 ? String(item.md5).toLowerCase() : void 0,
             serverMtime: Number(item.server_mtime || 0) * 1e3,
-            // convert sec to ms
             isdir: Number(item.isdir || 0)
           });
+          if (recursion && Number(item.isdir) === 1 && !visited.has(item.path)) directories.push(item.path);
         }
-      }
-      if (data.has_more === 1 && data.list && data.list.length > 0) {
+        if (data.has_more !== 1 && data.list.length < limit) break;
+        if (!data.list.length) throw new Error("\u8FDC\u7AEF\u5206\u9875\u7F3A\u5C11\u5185\u5BB9\uFF0C\u5DF2\u505C\u6B62\u540C\u6B65");
         start += data.list.length;
-      } else {
-        hasMore = false;
       }
     }
-    return result;
+    return [...result.values()];
   }
   /**
    * Get direct download link (dlink) for a given fs_id
@@ -895,6 +899,7 @@ var DEFAULT_SETTINGS = {
   username: "",
   remoteBasePath: "/apps/obsidian-vault",
   autoSync: false,
+  syncPaused: false,
   uploadConcurrency: 3,
   syncIntervalMinutes: 15,
   syncOnStartup: true,
@@ -1157,6 +1162,12 @@ var BaiduSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
+    new import_obsidian2.Setting(containerEl).setName("\u6682\u505C\u6240\u6709\u540C\u6B65").setDesc("\u6682\u505C\u5168\u91CF\u3001\u5B9A\u65F6\u3001\u672C\u5730\u4FEE\u6539\u540C\u6B65\u548C\u51B2\u7A81\u63D0\u4EA4\uFF1B\u5DF2\u5F00\u59CB\u7684\u5355\u4E2A\u6587\u4EF6\u64CD\u4F5C\u5B8C\u6210\u540E\u505C\u6B62\u3002").addToggle((t) => t.setValue(this.plugin.settings.syncPaused).onChange(async (value) => {
+      this.plugin.settings.syncPaused = value;
+      await this.plugin.saveSettings();
+      this.plugin.resetAutoSyncTimer();
+      this.plugin.updateStatusBar(value ? "\u5DF2\u6682\u505C" : "\u5C31\u7EEA", false);
+    }));
     new import_obsidian2.Setting(containerEl).setName("6. \u624B\u52A8\u64CD\u4F5C\u4E0E\u65E5\u5FD7 (Actions & Logs)").setHeading();
     new import_obsidian2.Setting(containerEl).setName("\u5168\u91CF\u53CC\u5411\u540C\u6B65").setDesc("\u6709\u9650\u5E76\u53D1\u4E0A\u4F20\u4E0D\u540C\u6587\u4EF6\uFF0C\u5E76\u4FDD\u7559\u5355\u6587\u4EF6\u63D0\u4EA4\u987A\u5E8F\u3001\u51B2\u7A81\u4FDD\u62A4\u4E0E\u539F\u5B50\u5199\u5165").addButton(
       (btn) => btn.setButtonText("\u7ACB\u5373\u540C\u6B65").setCta().onClick(async () => {
@@ -1318,6 +1329,54 @@ var SyncLogModal = class extends import_obsidian2.Modal {
   }
 };
 
+// src/sync/merge.ts
+function mergeText(local, remote) {
+  if (local === remote) return { diff: local.split("\n").map((l) => "  " + l).join("\n"), merged: local };
+  const a = local.split("\n"), b = remote.split("\n");
+  const pairs = [];
+  if (a.length * b.length <= 1e6) {
+    const rows = Array.from({ length: a.length + 1 }, () => new Uint32Array(b.length + 1));
+    for (let i2 = a.length - 1; i2 >= 0; i2--) for (let j2 = b.length - 1; j2 >= 0; j2--)
+      rows[i2][j2] = a[i2] === b[j2] ? rows[i2 + 1][j2 + 1] + 1 : Math.max(rows[i2 + 1][j2], rows[i2][j2 + 1]);
+    let i = 0, j = 0;
+    while (i < a.length && j < b.length) {
+      if (a[i] === b[j]) {
+        pairs.push([i++, j++]);
+      } else if (rows[i + 1][j] >= rows[i][j + 1]) i++;
+      else j++;
+    }
+  } else {
+    let i = 0;
+    while (i < a.length && i < b.length && a[i] === b[i]) {
+      pairs.push([i, i]);
+      i++;
+    }
+    let x = a.length - 1, y = b.length - 1;
+    const tail = [];
+    while (x >= i && y >= i && a[x] === b[y]) tail.push([x--, y--]);
+    pairs.push(...tail.reverse());
+  }
+  const diff = [], merged = [];
+  let ai = 0, bi = 0;
+  for (const [i, j] of [...pairs, [a.length, b.length]]) {
+    const left = a.slice(ai, i), right = b.slice(bi, j);
+    if (left.length || right.length) {
+      diff.push(...left.map((l) => "- " + l), ...right.map((l) => "+ " + l));
+      merged.push("<<<<<<< LOCAL", ...left, "=======", ...right, ">>>>>>> REMOTE");
+    }
+    if (i < a.length) {
+      diff.push("  " + a[i]);
+      merged.push(a[i]);
+    }
+    ai = i + 1;
+    bi = j + 1;
+  }
+  return { diff: diff.join("\n"), merged: merged.join("\n") };
+}
+function hasConflictMarkers(text) {
+  return /^(?:<{7} LOCAL|={7}|>{7} REMOTE)\r?$/m.test(text);
+}
+
 // src/sync/engine.ts
 var import_obsidian4 = require("obsidian");
 
@@ -1359,7 +1418,11 @@ function getFileName(p) {
 }
 
 // src/sync/conflict.ts
+function sameFileVersion(local, remote) {
+  return local.exists && remote.exists && !!local.md5 && local.md5 === remote.md5 && typeof local.mtime === "number" && Number.isFinite(local.mtime) && typeof remote.mtime === "number" && Number.isFinite(remote.mtime) && Math.floor(local.mtime / 1e3) === Math.floor(remote.mtime / 1e3);
+}
 function determineSyncAction(local, remote, base) {
+  if (sameFileVersion(local, remote)) return { action: "noop", reason: "Verified identical content and modification time", isConflict: false };
   if (base) {
     const localChanged = !local.exists || local.md5 !== base.localMd5;
     const remoteChanged = !remote.exists || remote.md5 !== base.remoteMd5;
@@ -1370,10 +1433,10 @@ function determineSyncAction(local, remote, base) {
       return { action: "noop", reason: "Deleted on both sides", isConflict: false };
     }
     if (!local.exists && !remoteChanged) {
-      return { action: "delete_remote", reason: "Deleted locally, clean up remote", isConflict: false };
+      return { action: "conflict", conflictSubtype: "local_deleted_remote_modified", reason: "Local deletion requires human confirmation", isConflict: true };
     }
     if (!remote.exists && !localChanged) {
-      return { action: "delete_local", reason: "Deleted remotely, clean up local", isConflict: false };
+      return { action: "conflict", conflictSubtype: "remote_deleted_local_modified", reason: "Remote deletion requires human confirmation", isConflict: true };
     }
     if (localChanged && !remoteChanged && local.exists) {
       return { action: "upload", reason: "Modified locally, upload to remote", isConflict: false };
@@ -1455,15 +1518,21 @@ function generateConflictPath(originalPath) {
 
 // src/utils/atomic.ts
 var import_obsidian3 = require("obsidian");
-var _AtomicFileSystem = class _AtomicFileSystem {
+var AtomicFileSystem = class {
   constructor(app) {
     this.app = app;
     this.transactionDir = `${app.vault.configDir || ".obsidian"}/plugins/baidu-sync/transactions`;
   }
   exclusive(work) {
-    const previous = _AtomicFileSystem.locks.get(this.app) || Promise.resolve();
+    const key = Symbol.for("baidu-sync.atomic-lock-registry.v1");
+    const host = globalThis;
+    const registry = host[key] || (host[key] = { apps: /* @__PURE__ */ new WeakMap(), paths: /* @__PURE__ */ new Map() });
+    const native = this.nativeIO();
+    const previous = (native ? registry.paths.get(native.base) : registry.apps.get(this.app)) || Promise.resolve();
     const next = previous.catch(() => void 0).then(work);
-    _AtomicFileSystem.locks.set(this.app, next.catch(() => void 0));
+    const settled = next.catch(() => void 0);
+    if (native) registry.paths.set(native.base, settled);
+    else registry.apps.set(this.app, settled);
     return next;
   }
   validateTarget(path) {
@@ -1504,7 +1573,16 @@ var _AtomicFileSystem = class _AtomicFileSystem {
   }
   async recoverOne(record) {
     const adapter = this.app.vault.adapter;
-    const j = JSON.parse(await adapter.read(record));
+    let contents;
+    try {
+      contents = await adapter.read(record);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      const stem2 = record.slice(0, -5);
+      if (await adapter.exists(record) || await adapter.exists(stem2 + ".new") || await adapter.exists(stem2 + ".old")) throw error;
+      return false;
+    }
+    const j = JSON.parse(contents);
     if (j.version !== 1 || typeof j.target !== "string" || !/^[a-f0-9]{32}$/.test(j.newHash) || !(j.oldHash === null || /^[a-f0-9]{32}$/.test(j.oldHash))) {
       throw new Error(`Invalid transaction journal; manual recovery required: ${record}`);
     }
@@ -1619,8 +1697,6 @@ var _AtomicFileSystem = class _AtomicFileSystem {
     return this.app.vault.adapter.readBinary(path);
   }
 };
-_AtomicFileSystem.locks = /* @__PURE__ */ new WeakMap();
-var AtomicFileSystem = _AtomicFileSystem;
 
 // src/sync/state.ts
 var SyncStateStore = class {
@@ -1738,6 +1814,7 @@ var SyncEngine = class {
     this.app = app;
     this.getSettings = getSettings;
     this.syncMutex = new Mutex();
+    this.interactiveConflictRequests = 0;
     this.taskQueue = new FifoQueue();
     this.debounceManager = new DebounceManager();
     this.isSyncing = false;
@@ -1817,6 +1894,7 @@ var SyncEngine = class {
    * Register local vault file modification with debounce for ordering
    */
   handleLocalFileModified(file) {
+    if (this.getSettings().syncPaused) return;
     if (!(file instanceof import_obsidian4.TFile)) return;
     if (this.shouldIgnore(file.path)) return;
     const debounceSeconds = this.getSettings().syncOnModifyDebounceSeconds || 3;
@@ -1830,6 +1908,7 @@ var SyncEngine = class {
    * Register local vault file deletion with debounce
    */
   handleLocalFileDeleted(file) {
+    if (this.getSettings().syncPaused) return;
     if (this.shouldIgnore(file.path)) return;
     this.debounceManager.debounce(file.path, 1e3, () => {
       this.taskQueue.enqueue(async () => {
@@ -1845,7 +1924,7 @@ var SyncEngine = class {
     return this.syncMutex.acquire(async () => {
       try {
         const settings = this.getSettings();
-        if (!settings.accessToken) return;
+        if (!settings.accessToken || settings.syncPaused) return;
         const remotePath = toRemotePath(settings.remoteBasePath, vaultPath);
         const base = this.stateStore.get(vaultPath);
         const localInspection = await this.inspectLocalFile(vaultPath);
@@ -1854,7 +1933,10 @@ var SyncEngine = class {
         }
         const remoteInspection = await this.inspectRemoteFile(remotePath);
         const decision = determineSyncAction(localInspection, remoteInspection, base);
-        if (decision.action === "noop") return;
+        if (decision.action === "noop") {
+          if (this.rememberIdenticalVersion(vaultPath, localInspection, remoteInspection, base)) await this.stateStore.save();
+          return;
+        }
         await this.executeAction(vaultPath, remotePath, decision, localInspection, remoteInspection, base);
         await this.stateStore.save();
       } catch (err) {
@@ -1877,6 +1959,10 @@ var SyncEngine = class {
         errors: []
       };
       const settings = this.getSettings();
+      if (settings.syncPaused) {
+        this.setStatus("\u5DF2\u6682\u505C", false);
+        return result;
+      }
       if (!settings.accessToken) {
         new import_obsidian4.Notice("\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\uFF1A\u8BF7\u5148\u5728\u8BBE\u7F6E\u4E2D\u586B\u5199\u5E76\u6388\u6743 Access Token\uFF01");
         return result;
@@ -1893,7 +1979,7 @@ var SyncEngine = class {
           localMap.set(normalizeVaultPath(file.path), file);
         }
         this.setStatus("\u83B7\u53D6\u7F51\u76D8\u6587\u4EF6\u5217\u8868...", true);
-        const remoteList = await this.client.listFiles(settings.remoteBasePath, true);
+        const remoteList = await this.client.listFiles(settings.remoteBasePath, true, () => this.interactiveConflictRequests > 0);
         const remoteMap = /* @__PURE__ */ new Map();
         for (const rItem of remoteList) {
           if (rItem.isdir === 1) continue;
@@ -1912,7 +1998,9 @@ var SyncEngine = class {
         const uploads = [];
         const serial = [];
         let completed = 0;
+        let acceptedIdentical = false;
         for (const path of allPaths) {
+          if (this.interactiveConflictRequests) break;
           this.setStatus(`\u68C0\u67E5\u6587\u4EF6 (${uploads.length + serial.length + completed + 1}/${allPaths.size})`, true);
           try {
             if (this.shouldIgnore(path)) {
@@ -1934,11 +2022,13 @@ var SyncEngine = class {
             } : { exists: false };
             let decision = determineSyncAction(localInspection, remoteInspection, base);
             if (decision.action === "noop") {
+              acceptedIdentical = this.rememberIdenticalVersion(path, localInspection, remoteInspection, base) || acceptedIdentical;
               completed++;
               result.skipped++;
               continue;
             }
             const work = async () => {
+              if (this.getSettings().syncPaused || this.interactiveConflictRequests) return;
               const itemStarted = Date.now();
               const wasUpload = decision.action === "upload";
               try {
@@ -1950,7 +2040,9 @@ var SyncEngine = class {
                 }
                 if (decision.action !== "noop") {
                   await this.executeAction(path, remotePath, decision, localInspection, remoteInspection, base);
-                  if (decision.action === "upload") {
+                  if (decision.action === "noop") {
+                    result.skipped++;
+                  } else if (decision.action === "upload") {
                     result.uploaded++;
                     this.log("success", `\u4E0A\u4F20\u6210\u529F: ${path}`);
                   } else if (decision.action === "download") {
@@ -1984,20 +2076,26 @@ var SyncEngine = class {
             result.errors.push({ path, error: itemErr.message || String(itemErr) });
           }
         }
+        if (acceptedIdentical) await this.stateStore.save();
         const concurrency = Math.max(1, Math.min(3, Math.floor(settings.uploadConcurrency || 3)));
         this.log("info", `\u4E0A\u4F20\u8BA1\u5212: ${uploads.length} \u4E2A\u6587\u4EF6\uFF0C\u5E76\u53D1 ${concurrency}`);
-        if (uploads.length || serial.length) await this.client.createDirectory(settings.remoteBasePath);
+        if (uploads.length) await this.client.createDirectory(settings.remoteBasePath);
         await runBounded(uploads, concurrency, (work) => work());
         for (const work of serial) await work();
         if (result.uploaded || result.downloaded || result.conflicted || result.deleted) {
           this.stateStore.setLastFullSyncTimestamp(Date.now());
           await this.stateStore.save();
         }
-        this.setStatus(this.getPendingConflicts().length ? "\u90E8\u5206\u6587\u4EF6\u5F85\u4EBA\u5DE5\u89E3\u51B3\u51B2\u7A81" : "\u5DF2\u540C\u6B65", false);
-        const summary = `\u540C\u6B65\u5B8C\u6210: \u8DF3\u8FC7${result.skipped} \u2191${result.uploaded} \u2193${result.downloaded} \u26A0${result.conflicted} \u2715${result.deleted}${result.errors.length ? ` (\u5931\u8D25: ${result.errors.length})` : ""}`;
+        this.setStatus(this.getSettings().syncPaused ? "\u5DF2\u6682\u505C" : this.getPendingConflicts().length ? "\u90E8\u5206\u6587\u4EF6\u5F85\u4EBA\u5DE5\u89E3\u51B3\u51B2\u7A81" : "\u5DF2\u540C\u6B65", false);
+        const summary = `${this.interactiveConflictRequests ? "\u540C\u6B65\u5DF2\u8BA9\u51FA\u6267\u884C\u673A\u4F1A\u7ED9\u51B2\u7A81\u5904\u7406\uFF0C\u5269\u4F59\u6587\u4EF6\u4E0B\u6B21\u7EE7\u7EED" : "\u540C\u6B65\u5B8C\u6210"}: \u8DF3\u8FC7${result.skipped} \u2191${result.uploaded} \u2193${result.downloaded} \u26A0${result.conflicted} \u2715${result.deleted}${result.errors.length ? ` (\u5931\u8D25: ${result.errors.length})` : ""}`;
         new import_obsidian4.Notice(summary);
         this.log("info", `${summary}\uFF1B\u603B\u8017\u65F6 ${((Date.now() - startedAt) / 1e3).toFixed(1)}s`);
       } catch (err) {
+        if (err.message === "SYNC_YIELD_FOR_CONFLICT") {
+          this.log("info", "\u5168\u91CF\u626B\u63CF\u5DF2\u5B89\u5168\u8BA9\u51FA\u6267\u884C\u673A\u4F1A\u7ED9\u51B2\u7A81\u5904\u7406\uFF1B\u672A\u4F7F\u7528\u4E0D\u5B8C\u6574\u76EE\u5F55\u6267\u884C\u540C\u6B65");
+          this.setStatus("\u6B63\u5728\u5904\u7406\u6240\u9009\u51B2\u7A81", true);
+          return result;
+        }
         this.log("error", "\u5168\u91CF\u540C\u6B65\u8FC7\u7A0B\u5F02\u5E38\u9000\u51FA", err.message || String(err));
         new import_obsidian4.Notice(`\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u9519\u8BEF: ${err.message || String(err)}`);
         this.setStatus("\u540C\u6B65\u51FA\u9519", false);
@@ -2077,6 +2175,20 @@ var SyncEngine = class {
       }
     }
   }
+  rememberIdenticalVersion(path, local, remote, base) {
+    if (!sameFileVersion(local, remote) || !remote.fsId) return false;
+    if (base?.localMd5 === local.md5 && base?.remoteMd5 === remote.md5 && base?.remoteFsId === remote.fsId) return false;
+    this.stateStore.set(path, {
+      path,
+      localMtime: local.mtime,
+      localMd5: local.md5,
+      remoteFsId: remote.fsId,
+      remoteMtime: remote.mtime,
+      remoteMd5: remote.md5,
+      lastSyncTime: Date.now()
+    });
+    return true;
+  }
   getPendingConflicts() {
     return this.stateStore.getConflicts?.() || [];
   }
@@ -2084,7 +2196,6 @@ var SyncEngine = class {
    * make a remote mutation until the user explicitly confirms resolution. */
   async resolveConflict(localPath, remotePath, decision, local, remote, base) {
     const existing = this.getPendingConflicts().find((c) => c.path === localPath);
-    if (existing && existing.remote.md5 === remote.md5 && existing.remote.fsId === remote.fsId && existing.remote.exists === remote.exists && (!remote.exists || existing.copies.length && await this.app.vault.adapter.exists(existing.copies[existing.copies.length - 1]))) return;
     let data;
     let copyPath;
     if (remote.exists) {
@@ -2095,6 +2206,44 @@ var SyncEngine = class {
         if (!settings.e2eePassword) throw new Error("\u65E0\u6CD5\u89E3\u5BC6\u8FDC\u7AEF\u51B2\u7A81\u526F\u672C");
         data = await decryptData(data, settings.e2eePassword);
       }
+      const current = await this.inspectLocalFile(localPath);
+      const plaintextMd5 = calculateMd5(data);
+      if (sameFileVersion(current, { ...remote, md5: plaintextMd5 })) {
+        this.stateStore.set(localPath, {
+          path: localPath,
+          localMtime: current.mtime,
+          localMd5: current.md5,
+          remoteFsId: remote.fsId,
+          remoteMtime: remote.mtime,
+          remoteMd5: remote.md5 || plaintextMd5,
+          lastSyncTime: Date.now()
+        });
+        if (existing) this.stateStore.clearConflict(localPath);
+        try {
+          await this.stateStore.save();
+        } catch (error) {
+          if (existing) this.stateStore.setConflict(existing);
+          throw error;
+        }
+        for (const copy of existing?.copies || []) {
+          if (await this.app.vault.adapter.exists(copy)) {
+            const bytes = await this.atomicFs.readBinary(copy);
+            if (calculateMd5(bytes) === plaintextMd5) {
+              try {
+                await this.atomicFs.safeDelete(copy);
+              } catch {
+                this.log("warn", `\u5DF2\u53BB\u9664\u51B2\u7A81\u6807\u8BB0\uFF1B\u91CD\u590D\u526F\u672C\u4FDD\u7559\u5F85\u624B\u52A8\u6E05\u7406: ${copy}`);
+              }
+            }
+          }
+        }
+        decision.action = "noop";
+        decision.isConflict = false;
+        this.setStatus("\u76F8\u540C\u7248\u672C\u5DF2\u5408\u5E76", false);
+        this.log("info", `\u5185\u5BB9\u53CA\u4FEE\u6539\u65F6\u95F4\u76F8\u540C\uFF0C\u4FDD\u7559\u539F\u6587\u4EF6: ${localPath}`);
+        return;
+      }
+      if (existing && existing.remote.md5 === remote.md5 && existing.remote.fsId === remote.fsId && existing.remote.exists === remote.exists && existing.copies.length && await this.app.vault.adapter.exists(existing.copies[existing.copies.length - 1])) return;
       copyPath = generateConflictPath(localPath);
       while (await this.app.vault.adapter.exists(copyPath)) copyPath = generateConflictPath(localPath);
     }
@@ -2111,6 +2260,50 @@ var SyncEngine = class {
     this.log("warn", `\u5F85\u4EBA\u5DE5\u89E3\u51B3\u51B2\u7A81: ${localPath}${copyPath ? `\uFF1B\u8FDC\u7AEF\u526F\u672C: ${copyPath}` : "\uFF1B\u8FDC\u7AEF\u5DF2\u5220\u9664"}`);
     new import_obsidian4.Notice(`\u767E\u5EA6\u540C\u6B65\u53D1\u73B0\u51B2\u7A81\uFF1A${localPath}\u3002\u5DF2\u6682\u505C\u6B64\u6587\u4EF6\u540C\u6B65\uFF0C\u8BF7\u6253\u5F00\u201C\u5F85\u5904\u7406\u51B2\u7A81\u201D\u4EBA\u5DE5\u5408\u5E76\u5E76\u786E\u8BA4\u3002`, 15e3);
   }
+  async readConflictMerge(path) {
+    const record = this.getPendingConflicts().find((c) => c.path === path);
+    if (!record) throw new Error("\u51B2\u7A81\u8BB0\u5F55\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u6253\u5F00");
+    if (!/\.(md|markdown|txt|json|csv|yaml|yml|xml|html|css|js|ts|log)$/i.test(path)) throw new Error("\u4E8C\u8FDB\u5236\u6587\u4EF6\u4E0D\u652F\u6301\u6587\u672C\u5408\u5E76\uFF0C\u8BF7\u9009\u62E9\u4FDD\u7559\u7248\u672C");
+    const read = async (p) => {
+      if (!await this.app.vault.adapter.exists(p)) return null;
+      const bytes = await this.atomicFs.readBinary(p);
+      if (bytes.byteLength > 2 * 1024 * 1024) throw new Error("\u6587\u4EF6\u8D85\u8FC7 2 MB\uFF0C\u8BF7\u5728\u7F16\u8F91\u5668\u4E2D\u624B\u52A8\u5904\u7406");
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      if (text.includes("\0")) throw new Error("\u4E8C\u8FDB\u5236\u5185\u5BB9\u4E0D\u652F\u6301\u6587\u672C\u5408\u5E76");
+      return text;
+    };
+    const local = await read(path);
+    const copy = record.copies[record.copies.length - 1];
+    const remote = record.remote.exists ? copy ? await read(copy) : null : null;
+    if (record.remote.exists && remote === null) throw new Error("\u8FDC\u7AEF\u526F\u672C\u7F3A\u5931\uFF0C\u8BF7\u5148\u66F4\u65B0\u8FDC\u7AEF\u526F\u672C");
+    return { local, remote, signature: JSON.stringify(record) };
+  }
+  async saveConflictMerge(path, expected, text) {
+    return this.syncMutex.acquire(async () => {
+      if (hasConflictMarkers(text)) throw new Error("\u8BF7\u5148\u5904\u7406\u6240\u6709\u51B2\u7A81\u6807\u8BB0\uFF0C\u518D\u4FDD\u5B58\u5408\u5E76\u7ED3\u679C");
+      const current = await this.readConflictMerge(path);
+      if (JSON.stringify(current) !== JSON.stringify(expected)) throw new Error("\u6587\u4EF6\u6216\u51B2\u7A81\u7248\u672C\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u6253\u5F00\u6BD4\u8F83\uFF0C\u907F\u514D\u8986\u76D6\u65B0\u4FEE\u6539");
+      const data = new TextEncoder().encode(text).buffer;
+      await this.atomicFs.atomicWrite(path, data, calculateMd5(data));
+      try {
+        await this.commitConflictResolution(path);
+      } catch (e) {
+        throw new Error(`\u5408\u5E76\u5185\u5BB9\u5DF2\u4FDD\u5B58\uFF0C\u4F46\u63D0\u4EA4\u672A\u5B8C\u6210\uFF0C\u51B2\u7A81\u4ECD\u4FDD\u7559\uFF1A${e.message || String(e)}`);
+      }
+    });
+  }
+  async trashConflictFile(conflictPath, target) {
+    return this.syncMutex.acquire(async () => {
+      const record = this.getPendingConflicts().find((c) => c.path === conflictPath);
+      if (!record || target !== record.path && !record.copies.includes(target)) {
+        throw new Error("\u53EA\u80FD\u5220\u9664\u5F53\u524D\u51B2\u7A81\u767B\u8BB0\u7684\u539F\u6587\u4EF6\u6216\u526F\u672C");
+      }
+      if (!await this.app.vault.adapter.exists(target)) throw new Error("\u6587\u4EF6\u4E0D\u5B58\u5728\u6216\u5DF2\u7ECF\u79FB\u5165\u56DE\u6536\u7AD9");
+      await this.atomicFs.safeDelete(target);
+      this.log("info", `\u51B2\u7A81\u6587\u4EF6\u5DF2\u79FB\u5165\u672C\u5730\u56DE\u6536\u7AD9\uFF08\u672A\u4FEE\u6539\u7F51\u76D8\uFF09: ${target}`);
+      new import_obsidian4.Notice("\u5DF2\u79FB\u5165\u672C\u5730\u56DE\u6536\u7AD9\uFF0C\u7F51\u76D8\u6587\u4EF6\u672A\u6539\u52A8\u3002");
+    });
+  }
   async refreshPendingConflict(path) {
     return this.syncMutex.acquire(async () => {
       const record = this.getPendingConflicts().find((c) => c.path === path);
@@ -2124,38 +2317,102 @@ var SyncEngine = class {
       );
     });
   }
+  async acceptConflictVersions(paths, side, progress) {
+    this.interactiveConflictRequests++;
+    const selected = [...new Set(paths)];
+    try {
+      const resolved = [], failed = [];
+      progress?.(0, selected.length, "");
+      for (const path of selected) {
+        try {
+          await this.syncMutex.acquire(async () => {
+            if (this.getSettings().syncPaused) throw new Error("\u540C\u6B65\u5DF2\u6682\u505C");
+            const record = this.getPendingConflicts().find((c) => c.path === path);
+            if (!record) throw new Error("\u51B2\u7A81\u8BB0\u5F55\u5DF2\u53D8\u5316\uFF0C\u8BF7\u5237\u65B0\u5217\u8868");
+            if (side === "local") {
+              await this.commitConflictResolution(path);
+              return;
+            }
+            const remote = await this.inspectRemoteFile(record.remotePath);
+            if (remote.exists !== record.remote.exists || remote.md5 !== record.remote.md5 || remote.fsId !== record.remote.fsId) {
+              await this.resolveConflict(path, record.remotePath, { action: "conflict", reason: "Remote changed again", isConflict: true }, await this.inspectLocalFile(path), remote);
+              throw new Error("\u8FDC\u7AEF\u7248\u672C\u5DF2\u53D8\u5316\uFF0C\u8BF7\u68C0\u67E5\u66F4\u65B0\u540E\u7684\u51B2\u7A81\u518D\u9009\u62E9");
+            }
+            const local = await this.inspectLocalFile(path);
+            if (local.exists) {
+              const bytes = await this.atomicFs.readBinary(path);
+              let backup = generateConflictPath(path);
+              while (await this.app.vault.adapter.exists(backup)) backup = generateConflictPath(path);
+              const updated = { ...record, copies: [...record.copies, backup] };
+              this.stateStore.setConflict(updated);
+              await this.stateStore.save();
+              await this.atomicFs.atomicWrite(backup, bytes, calculateMd5(bytes));
+            }
+            if (remote.exists) await this.executeAction(path, record.remotePath, { action: "download", reason: "User accepted remote", isConflict: false }, local, remote);
+            else {
+              if (local.exists) await this.atomicFs.safeDelete(path);
+              this.stateStore.delete(path);
+            }
+            const pending = this.getPendingConflicts().find((c) => c.path === path);
+            this.stateStore.clearConflict(path);
+            try {
+              await this.stateStore.save();
+            } catch (e) {
+              this.stateStore.setConflict(pending);
+              throw e;
+            }
+            this.setStatus("\u51B2\u7A81\u5DF2\u5904\u7406", false);
+          });
+          resolved.push(path);
+        } catch (e) {
+          failed.push({ path, message: e.message || String(e) });
+        }
+        progress?.(resolved.length + failed.length, selected.length, path);
+      }
+      return { resolved, failed };
+    } finally {
+      this.interactiveConflictRequests--;
+    }
+  }
   async confirmConflictResolved(path) {
-    return this.syncMutex.acquire(async () => {
-      const record = this.getPendingConflicts().find((c) => c.path === path);
-      if (!record) return;
-      const remote = await this.inspectRemoteFile(record.remotePath);
-      if (remote.exists !== record.remote.exists || remote.md5 !== record.remote.md5 || remote.fsId !== record.remote.fsId) {
-        await this.resolveConflict(
-          path,
-          record.remotePath,
-          { action: "conflict", reason: "Remote changed again", isConflict: true },
-          await this.inspectLocalFile(path),
-          remote
-        );
-        throw new Error("\u8FDC\u7AEF\u53C8\u53D1\u751F\u4E86\u53D8\u5316\uFF0C\u5DF2\u66F4\u65B0\u51B2\u7A81\u8BB0\u5F55\uFF0C\u8BF7\u91CD\u65B0\u68C0\u67E5\u53CC\u65B9\u7248\u672C\u3002");
+    return this.syncMutex.acquire(() => this.commitConflictResolution(path));
+  }
+  async commitConflictResolution(path) {
+    if (this.getSettings().syncPaused) throw new Error("\u540C\u6B65\u5DF2\u6682\u505C\uFF0C\u8BF7\u5148\u5728\u8BBE\u7F6E\u4E2D\u89E3\u9664\u6682\u505C");
+    const record = this.getPendingConflicts().find((c) => c.path === path);
+    if (!record) return;
+    const remote = await this.inspectRemoteFile(record.remotePath);
+    if (remote.exists !== record.remote.exists || remote.md5 !== record.remote.md5 || remote.fsId !== record.remote.fsId) {
+      await this.resolveConflict(
+        path,
+        record.remotePath,
+        { action: "conflict", reason: "Remote changed again", isConflict: true },
+        await this.inspectLocalFile(path),
+        remote
+      );
+      throw new Error("\u8FDC\u7AEF\u53C8\u53D1\u751F\u4E86\u53D8\u5316\uFF0C\u5DF2\u66F4\u65B0\u51B2\u7A81\u8BB0\u5F55\uFF0C\u8BF7\u91CD\u65B0\u68C0\u67E5\u53CC\u65B9\u7248\u672C\u3002");
+    }
+    const local = await this.inspectLocalFile(path);
+    if (local.exists) {
+      if (/\.(md|markdown|txt|json|csv|yaml|yml|xml|html|css|js|ts|log)$/i.test(path)) {
+        const text = new TextDecoder().decode(await this.atomicFs.readBinary(path));
+        if (hasConflictMarkers(text)) throw new Error("\u539F\u6587\u4EF6\u4ECD\u6709\u51B2\u7A81\u6807\u8BB0\uFF0C\u8BF7\u5148\u5B8C\u6210\u5408\u5E76");
       }
-      const local = await this.inspectLocalFile(path);
-      if (local.exists) {
-        await this.executeAction(path, record.remotePath, { action: "upload", reason: "User confirmed merge", isConflict: false }, local, remote);
-      } else if (remote.exists) {
-        await this.client.deleteFile(record.remotePath);
-        this.stateStore.delete(path);
-      } else this.stateStore.delete(path);
-      this.stateStore.clearConflict(path);
-      try {
-        await this.stateStore.save();
-      } catch (error) {
-        this.stateStore.setConflict(record);
-        throw error;
-      }
-      this.setStatus("\u51B2\u7A81\u5DF2\u5904\u7406", false);
-      new import_obsidian4.Notice(`\u51B2\u7A81\u5DF2\u7531\u4EBA\u5DE5\u786E\u8BA4\u5E76\u540C\u6B65\uFF1A${path}`);
-    });
+      if (!remote.exists) await this.client.createDirectory(this.getSettings().remoteBasePath);
+      await this.executeAction(path, record.remotePath, { action: "upload", reason: "User confirmed merge", isConflict: false }, local, remote);
+    } else if (remote.exists) {
+      await this.client.deleteFile(record.remotePath);
+      this.stateStore.delete(path);
+    } else this.stateStore.delete(path);
+    this.stateStore.clearConflict(path);
+    try {
+      await this.stateStore.save();
+    } catch (error) {
+      this.stateStore.setConflict(record);
+      throw error;
+    }
+    this.setStatus("\u51B2\u7A81\u5DF2\u5904\u7406", false);
+    new import_obsidian4.Notice(`\u51B2\u7A81\u5DF2\u89E3\u51B3\u5E76\u540C\u6B65\uFF0C\u5DF2\u4ECE\u5217\u8868\u79FB\u9664\uFF1A${path}`);
   }
   async inspectLocalFile(vaultPath, cachedFile) {
     const adapter = this.app.vault.adapter;
@@ -2201,23 +2458,157 @@ var ConflictReviewModal = class extends import_obsidian5.Modal {
   constructor(app, engine) {
     super(app);
     this.engine = engine;
+    this.selected = /* @__PURE__ */ new Set();
+    this.batchBusy = false;
+  }
+  selectionBox(setting, checked, label, change) {
+    const input = setting.controlEl.createEl("input", { type: "checkbox", attr: { "aria-label": label } });
+    input.checked = checked;
+    input.disabled = this.batchBusy;
+    input.addEventListener("change", () => change(input.checked));
+    return setting;
+  }
+  async openInObsidian(path) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof import_obsidian5.TFile)) {
+      new import_obsidian5.Notice("\u6587\u4EF6\u4E0D\u5B58\u5728\uFF1B\u4E0D\u4F1A\u81EA\u52A8\u521B\u5EFA\u7A7A\u767D\u7B14\u8BB0\u3002", 1e4);
+      return;
+    }
+    const textExtensions = ["md", "markdown", "txt", "json", "csv", "yaml", "yml", "xml", "html", "css", "js", "ts", "log"];
+    const internalMedia = ["pdf", "png", "jpg", "jpeg", "gif", "svg", "webp", "avif", "bmp", "mp3", "wav", "ogg", "m4a", "mp4", "webm", "canvas", "base"];
+    if (!textExtensions.includes(file.extension) && !internalMedia.includes(file.extension)) {
+      new import_obsidian5.Notice("Obsidian \u6682\u4E0D\u652F\u6301\u6B64\u6587\u4EF6\u7684\u5185\u90E8\u9884\u89C8\uFF0C\u672A\u8C03\u7528\u5916\u90E8\u7A0B\u5E8F\u3002", 1e4);
+      return;
+    }
+    this.close();
+    const leaf = this.app.workspace.getLeaf("tab");
+    if (textExtensions.includes(file.extension)) {
+      await leaf.setViewState({ type: "markdown", state: { file: file.path, mode: "source" }, active: true });
+    } else await leaf.openFile(file, { active: true });
+    await this.app.workspace.revealLeaf(leaf);
+    this.app.workspace.setActiveLeaf(leaf, { focus: true });
+    leaf.view.containerEl.ownerDocument.defaultView?.focus();
+  }
+  async openMerge(path) {
+    try {
+      const snapshot = await this.engine.readConflictMerge(path);
+      const comparison = mergeText(snapshot.local ?? "", snapshot.remote ?? "");
+      const modal = new import_obsidian5.Modal(this.app);
+      modal.modalEl.addClass("baidu-merge-modal");
+      modal.contentEl.createEl("h2", { text: "\u6BD4\u8F83\u5E76\u5408\u5E76\uFF1A" + path });
+      modal.contentEl.createEl("p", { text: "\u2212 \u672C\u5730\u5185\u5BB9\uFF0C+ \u7F51\u76D8\u5185\u5BB9\u3002\u4E0B\u65B9\u7F16\u8F91\u540C\u4E00\u4EFD\u5408\u5E76\u7ED3\u679C\uFF0C\u5220\u9664\u51B2\u7A81\u6807\u8BB0\u540E\u4FDD\u5B58\u3002\u65E0\u5386\u53F2\u6B63\u6587\u57FA\u7EBF\uFF0C\u5DEE\u5F02\u9700\u4EBA\u5DE5\u5224\u65AD\u3002" });
+      if (snapshot.local === null || snapshot.remote === null) modal.contentEl.createEl("p", { text: snapshot.local === null ? "\u672C\u5730\u5DF2\u5220\u9664\uFF1B\u4FDD\u5B58\u5C06\u6062\u590D\u6B64\u6587\u4EF6\u3002" : "\u7F51\u76D8\u5DF2\u5220\u9664\uFF1B\u4FDD\u5B58\u5E76\u63D0\u4EA4\u5C06\u6062\u590D\u7F51\u76D8\u6587\u4EF6\u3002" });
+      const diff = modal.contentEl.createEl("pre", { cls: "baidu-merge-diff" });
+      for (const line of comparison.diff.split("\n")) diff.createEl("div", { text: line, cls: line.startsWith("- ") ? "baidu-merge-removed" : line.startsWith("+ ") ? "baidu-merge-added" : "" });
+      const editor = modal.contentEl.createEl("textarea", { cls: "baidu-merge-editor", attr: { "aria-label": "\u5408\u5E76\u7ED3\u679C", "spellcheck": "false" } });
+      editor.value = comparison.merged;
+      new import_obsidian5.Setting(modal.contentEl).addButton((b) => b.setButtonText("\u91C7\u7528\u672C\u5730\u5185\u5BB9").onClick(() => {
+        editor.value = snapshot.local ?? "";
+      })).addButton((b) => b.setButtonText("\u91C7\u7528\u7F51\u76D8\u5185\u5BB9").onClick(() => {
+        editor.value = snapshot.remote ?? "";
+      })).addButton((b) => b.setButtonText("\u91CD\u7F6E\u4E3A\u51B2\u7A81\u6807\u8BB0").onClick(() => {
+        editor.value = comparison.merged;
+      }));
+      new import_obsidian5.Setting(modal.contentEl).setDesc("\u4FDD\u5B58\u540E\u81EA\u52A8\u63D0\u4EA4\u5E76\u6807\u8BB0\u5DF2\u89E3\u51B3\uFF0C\u6210\u529F\u540E\u4ECE\u51B2\u7A81\u5217\u8868\u79FB\u9664\uFF1B\u5907\u4EFD\u4FDD\u7559\u3002\u63D0\u4EA4\u5931\u8D25\u65F6\u4FDD\u7559\u5F85\u529E\u3002").addButton((b) => b.setButtonText("\u53D6\u6D88").onClick(() => modal.close())).addButton((b) => b.setButtonText("\u4FDD\u5B58\u5E76\u89E3\u51B3\u51B2\u7A81").setCta().onClick(async () => {
+        b.setDisabled(true);
+        try {
+          await this.engine.saveConflictMerge(path, snapshot, editor.value);
+          modal.close();
+          this.onOpen();
+        } catch (e) {
+          new import_obsidian5.Notice(e.message || String(e), 1e4);
+          b.setDisabled(false);
+        }
+      }));
+      modal.open();
+    } catch (e) {
+      new import_obsidian5.Notice(e.message || String(e), 1e4);
+    }
+  }
+  confirmBatch(side) {
+    if (this.batchBusy) return;
+    const paths = [...this.selected];
+    if (!paths.length) {
+      new import_obsidian5.Notice("\u8BF7\u5148\u52FE\u9009\u9700\u8981\u5904\u7406\u7684\u51B2\u7A81");
+      return;
+    }
+    const modal = new import_obsidian5.Modal(this.app);
+    modal.contentEl.createEl("h2", { text: `\u63A5\u53D7\u6240\u9009${side === "local" ? "\u672C\u5730" : "\u8FDC\u7AEF"}\u7248\u672C\uFF08${paths.length} \u9879\uFF09` });
+    modal.contentEl.createEl("p", { text: side === "local" ? "\u4EE5\u5F53\u524D\u672C\u5730\u5185\u5BB9\u8986\u76D6\u7F51\u76D8\uFF1B\u672C\u5730\u5DF2\u5220\u9664\u7684\u6587\u4EF6\u4F1A\u540C\u6B65\u5220\u9664\u7F51\u76D8\u7248\u672C\u3002\u6210\u529F\u540E\u81EA\u52A8\u79FB\u51FA\u51B2\u7A81\u5217\u8868\u3002" : "\u4EE5\u7F51\u76D8\u7248\u672C\u8986\u76D6\u672C\u5730\uFF1B\u7F51\u76D8\u5DF2\u5220\u9664\u7684\u6587\u4EF6\u4F1A\u79FB\u5165\u672C\u5730\u56DE\u6536\u7AD9\u3002\u88AB\u8986\u76D6\u7684\u672C\u5730\u5185\u5BB9\u4F1A\u4FDD\u7559\u5907\u4EFD\uFF0C\u6210\u529F\u540E\u81EA\u52A8\u79FB\u51FA\u51B2\u7A81\u5217\u8868\u3002" });
+    const list = modal.contentEl.createEl("ul");
+    for (const path of paths) list.createEl("li", { text: path });
+    const status = modal.contentEl.createEl("p", { text: "\u786E\u8BA4\u540E\u5C06\u9010\u9879\u5904\u7406\u3002" });
+    new import_obsidian5.Setting(modal.contentEl).addButton((b) => b.setButtonText("\u5173\u95ED\u7A97\u53E3").onClick(() => modal.close())).addButton((b) => b.setButtonText("\u786E\u8BA4\u6279\u91CF\u63A5\u53D7").setWarning().onClick(async () => {
+      b.setDisabled(true);
+      this.batchBusy = true;
+      status.setText("\u7B49\u5F85\u6B63\u5728\u4F20\u8F93\u7684\u6587\u4EF6\u5B89\u5168\u5B8C\u6210\uFF0C\u7136\u540E\u4F18\u5148\u5904\u7406\u6240\u9009\u51B2\u7A81\u2026\u5173\u95ED\u7A97\u53E3\u4E0D\u4F1A\u53D6\u6D88\u6B63\u5728\u8FDB\u884C\u7684\u63D0\u4EA4\u3002");
+      try {
+        const result = await this.engine.acceptConflictVersions(paths, side, (done, total, path) => {
+          status.setText(done === 0 ? `\u7B49\u5F85\u540C\u6B65\u8BA9\u51FA\u6267\u884C\u673A\u4F1A\uFF080/${total}\uFF09\u2026` : `\u5DF2\u5904\u7406 ${done}/${total}\uFF1A${path}`);
+          b.setButtonText(`\u5904\u7406\u4E2D ${done}/${total}`);
+        });
+        for (const path of result.resolved) this.selected.delete(path);
+        modal.close();
+        new import_obsidian5.Notice(`\u6279\u91CF\u89E3\u51B3\u5B8C\u6210\uFF1A\u6210\u529F ${result.resolved.length} \u9879\uFF0C\u5931\u8D25 ${result.failed.length} \u9879`, 1e4);
+        if (result.failed.length) {
+          const errors = new import_obsidian5.Modal(this.app);
+          errors.contentEl.createEl("h2", { text: "\u4EE5\u4E0B\u51B2\u7A81\u672A\u5B8C\u6210\uFF0C\u4ECD\u4FDD\u7559\u5728\u5217\u8868" });
+          for (const error of result.failed) errors.contentEl.createEl("p", { text: `${error.path}\uFF1A${error.message}` });
+          errors.open();
+        }
+      } catch (e) {
+        new import_obsidian5.Notice(e.message || String(e), 1e4);
+        b.setDisabled(false);
+      } finally {
+        this.batchBusy = false;
+        this.onOpen();
+      }
+    }));
+    modal.open();
+  }
+  confirmTrash(conflictPath, target) {
+    const modal = new import_obsidian5.Modal(this.app);
+    new import_obsidian5.Setting(modal.contentEl).setName("\u786E\u8BA4\u79FB\u5165\u672C\u5730\u56DE\u6536\u7AD9").setHeading();
+    modal.contentEl.createEl("p", { text: `\u5C06 ${target} \u79FB\u5165 Obsidian \u672C\u5730\u56DE\u6536\u7AD9\uFF0C\u53EF\u6062\u590D\u3002\u6B64\u64CD\u4F5C\u4E0D\u4F1A\u5220\u9664\u7F51\u76D8\u6587\u4EF6\u3002\u5220\u9664\u539F\u6587\u4EF6\u540E\uFF0C\u53EA\u6709\u53E6\u884C\u70B9\u51FB\u201C\u786E\u8BA4\u5DF2\u89E3\u51B3\u5E76\u63D0\u4EA4\u201D\u624D\u4F1A\u5C06\u5220\u9664\u540C\u6B65\u5230\u7F51\u76D8\u3002` });
+    new import_obsidian5.Setting(modal.contentEl).addButton((b) => b.setButtonText("\u53D6\u6D88").onClick(() => modal.close())).addButton((b) => b.setButtonText("\u786E\u8BA4\u79FB\u5165\u56DE\u6536\u7AD9").setWarning().onClick(async () => {
+      b.setDisabled(true);
+      try {
+        await this.engine.trashConflictFile(conflictPath, target);
+        modal.close();
+        this.onOpen();
+      } catch (e) {
+        new import_obsidian5.Notice(`\u5220\u9664\u5931\u8D25\uFF1A${e.message || String(e)}`, 1e4);
+        b.setDisabled(false);
+      }
+    }));
+    modal.open();
   }
   onOpen() {
     this.contentEl.empty();
     new import_obsidian5.Setting(this.contentEl).setName("\u5F85\u4EBA\u5DE5\u89E3\u51B3\u7684\u540C\u6B65\u51B2\u7A81").setHeading();
-    this.contentEl.createEl("p", { text: "\u539F\u6587\u4EF6\u662F\u672C\u5730\u7248\u672C\uFF0C\u526F\u672C\u662F\u5F53\u65F6\u7684\u7F51\u76D8\u7248\u672C\u3002\u8BF7\u4EBA\u5DE5\u6BD4\u8F83\uFF0C\u628A\u6700\u7EC8\u5185\u5BB9\u5199\u5165\u539F\u6587\u4EF6\uFF0C\u518D\u786E\u8BA4\u63D0\u4EA4\u3002\u82E5\u539F\u6587\u4EF6\u5DF2\u5220\u9664\uFF0C\u786E\u8BA4\u4F1A\u540C\u6B65\u5220\u9664\u7F51\u76D8\u6587\u4EF6\u3002\u672A\u786E\u8BA4\u524D\u6682\u505C\u6B64\u6587\u4EF6\u540C\u6B65\uFF0C\u5176\u4ED6\u6587\u4EF6\u7167\u5E38\u3002" });
+    this.contentEl.createEl("p", { text: "\u70B9\u51FB\u201C\u6BD4\u8F83\u5E76\u5408\u5E76\u201D\u67E5\u770B\u9010\u884C diff\uFF0C\u5728\u540C\u4E00\u4E2A\u7F16\u8F91\u6846\u4E2D\u89E3\u51B3\u51B2\u7A81\uFF1B\u4FDD\u5B58\u540E\u81EA\u52A8\u63D0\u4EA4\u5E76\u4ECE\u5217\u8868\u79FB\u9664\u3002\u526F\u672C\u4EC5\u4F5C\u4E3A\u5B89\u5168\u5907\u4EFD\u3002\u82E5\u539F\u6587\u4EF6\u5DF2\u5220\u9664\uFF0C\u786E\u8BA4\u4F1A\u540C\u6B65\u5220\u9664\u7F51\u76D8\u6587\u4EF6\u3002\u672A\u786E\u8BA4\u524D\u6682\u505C\u6B64\u6587\u4EF6\u540C\u6B65\uFF0C\u5176\u4ED6\u6587\u4EF6\u7167\u5E38\u3002" });
     const conflicts = this.engine.getPendingConflicts();
+    for (const path of this.selected) if (!conflicts.some((c) => c.path === path)) this.selected.delete(path);
+    if (conflicts.length) this.selectionBox(new import_obsidian5.Setting(this.contentEl).setName(`\u5168\u9009\uFF08\u5DF2\u9009 ${this.selected.size} / ${conflicts.length}\uFF09`), this.selected.size === conflicts.length, "\u5168\u9009\u51B2\u7A81", (value) => {
+      this.selected.clear();
+      if (value) for (const c of conflicts) this.selected.add(c.path);
+      this.onOpen();
+    }).addButton((b) => b.setButtonText("\u63A5\u53D7\u6240\u9009\u8FDC\u7AEF\u7248\u672C").setDisabled(this.batchBusy).onClick(() => this.confirmBatch("remote"))).addButton((b) => b.setButtonText("\u63A5\u53D7\u6240\u9009\u672C\u5730\u7248\u672C").setDisabled(this.batchBusy).onClick(() => this.confirmBatch("local")));
     if (!conflicts.length) this.contentEl.createEl("p", { text: "\u6682\u65E0\u5F85\u5904\u7406\u51B2\u7A81\u3002" });
     for (const record of conflicts) {
-      new import_obsidian5.Setting(this.contentEl).setName(record.path).setDesc(record.remote.exists ? "\u53CC\u65B9\u7248\u672C\u5DF2\u4FDD\u7559\uFF0C\u7B49\u5F85\u4EBA\u5DE5\u786E\u8BA4" : "\u7F51\u76D8\u7AEF\u5DF2\u5220\u9664\uFF0C\u672C\u5730\u7248\u672C\u4FDD\u7559\uFF0C\u7B49\u5F85\u4EBA\u5DE5\u786E\u8BA4").addButton((b) => b.setButtonText("\u6253\u5F00\u539F\u6587\u4EF6").onClick(async () => {
-        if (await this.app.vault.adapter.exists(record.path)) await this.app.workspace.openLinkText(record.path, "", true);
+      this.selectionBox(new import_obsidian5.Setting(this.contentEl).setName(record.path), this.selected.has(record.path), `\u9009\u62E9\u51B2\u7A81\uFF1A${record.path}`, (value) => {
+        if (value) this.selected.add(record.path);
+        else this.selected.delete(record.path);
+        this.onOpen();
+      }).setDesc(record.remote.exists ? "\u53CC\u65B9\u7248\u672C\u5DF2\u4FDD\u7559\uFF0C\u7B49\u5F85\u4EBA\u5DE5\u786E\u8BA4" : "\u7F51\u76D8\u7AEF\u5DF2\u5220\u9664\uFF0C\u672C\u5730\u7248\u672C\u4FDD\u7559\uFF0C\u7B49\u5F85\u4EBA\u5DE5\u786E\u8BA4").addButton((b) => b.setButtonText("\u6BD4\u8F83\u5E76\u5408\u5E76").onClick(() => this.openMerge(record.path))).addButton((b) => b.setButtonText("\u6253\u5F00\u539F\u6587\u4EF6").onClick(async () => {
+        if (await this.app.vault.adapter.exists(record.path)) await this.openInObsidian(record.path);
         else new import_obsidian5.Notice("\u539F\u6587\u4EF6\u5DF2\u5220\u9664\uFF1B\u9700\u8981\u4FDD\u7559\u5185\u5BB9\u65F6\u8BF7\u5148\u624B\u52A8\u6062\u590D\u539F\u6587\u4EF6\u3002\u786E\u8BA4\u89E3\u51B3\u4F1A\u91C7\u7528\u5220\u9664\u3002", 1e4);
-      }));
+      })).addButton((b) => b.setButtonText("\u5220\u9664\u539F\u6587\u4EF6").setWarning().onClick(() => this.confirmTrash(record.path, record.path)));
       for (const copy of record.copies) {
         new import_obsidian5.Setting(this.contentEl).setName(copy).addButton((b) => b.setButtonText("\u6253\u5F00\u8FDC\u7AEF\u526F\u672C").onClick(async () => {
-          if (await this.app.vault.adapter.exists(copy)) await this.app.workspace.openLinkText(copy, "", true);
+          if (await this.app.vault.adapter.exists(copy)) await this.openInObsidian(copy);
           else new import_obsidian5.Notice("\u8BE5\u526F\u672C\u4E0D\u5B58\u5728\uFF0C\u8BF7\u5148\u70B9\u51FB\u66F4\u65B0\u8FDC\u7AEF\u526F\u672C\u3002", 1e4);
-        }));
+        })).addButton((b) => b.setButtonText("\u5220\u9664\u526F\u672C").setWarning().onClick(() => this.confirmTrash(record.path, copy)));
       }
       new import_obsidian5.Setting(this.contentEl).setName("\u68C0\u67E5\u8FDC\u7AEF\u6700\u65B0\u7248\u672C").addButton((b) => b.setButtonText("\u66F4\u65B0\u8FDC\u7AEF\u526F\u672C").onClick(async () => {
         b.setDisabled(true);
@@ -2264,7 +2655,7 @@ var BaiduNetdiskSyncPlugin = class extends import_obsidian6.Plugin {
       }
     });
     this.statusBarItem = this.addStatusBarItem();
-    this.updateStatusBar("\u5C31\u7EEA", false);
+    this.updateStatusBar(this.settings.syncPaused ? "\u5DF2\u6682\u505C" : "\u5C31\u7EEA", false);
     this.syncEngine = new SyncEngine(
       this.app,
       () => this.settings,
@@ -2274,7 +2665,7 @@ var BaiduNetdiskSyncPlugin = class extends import_obsidian6.Plugin {
       }
     );
     await this.syncEngine.initialize();
-    this.updateStatusBar("\u5C31\u7EEA", false);
+    this.updateStatusBar(this.settings.syncPaused ? "\u5DF2\u6682\u505C" : "\u5C31\u7EEA", false);
     if (this.syncEngine.getPendingConflicts().length) {
       new import_obsidian6.Notice(`\u6709 ${this.syncEngine.getPendingConflicts().length} \u4E2A\u540C\u6B65\u51B2\u7A81\u5F85\u4EBA\u5DE5\u5904\u7406\uFF0C\u70B9\u51FB\u72B6\u6001\u680F\u67E5\u770B\u3002`, 15e3);
     }
@@ -2316,7 +2707,7 @@ var BaiduNetdiskSyncPlugin = class extends import_obsidian6.Plugin {
       })
     );
     this.resetAutoSyncTimer();
-    if (this.settings.syncOnStartup && this.settings.accessToken) {
+    if (!this.settings.syncPaused && this.settings.syncOnStartup && this.settings.accessToken) {
       setTimeout(() => {
         this.runSync();
       }, 3e3);
@@ -2356,6 +2747,10 @@ var BaiduNetdiskSyncPlugin = class extends import_obsidian6.Plugin {
     new ConflictReviewModal(this.app, this.syncEngine).open();
   }
   async runSync() {
+    if (this.settings.syncPaused) {
+      new import_obsidian6.Notice("\u540C\u6B65\u5DF2\u6682\u505C\uFF0C\u8BF7\u5148\u5728\u63D2\u4EF6\u8BBE\u7F6E\u4E2D\u89E3\u9664\u6682\u505C\u3002");
+      return;
+    }
     if (!this.settings.accessToken) {
       new import_obsidian6.Notice("\u8BF7\u5148\u5728\u8BBE\u7F6E\u4E2D\u914D\u7F6E\u767E\u5EA6\u7F51\u76D8 Access Token\uFF01");
       return;
@@ -2367,7 +2762,7 @@ var BaiduNetdiskSyncPlugin = class extends import_obsidian6.Plugin {
       window.clearInterval(this.autoSyncIntervalId);
       this.autoSyncIntervalId = void 0;
     }
-    if (this.settings.autoSync && this.settings.syncIntervalMinutes > 0) {
+    if (!this.settings.syncPaused && this.settings.autoSync && this.settings.syncIntervalMinutes > 0) {
       const intervalMs = this.settings.syncIntervalMinutes * 60 * 1e3;
       this.autoSyncIntervalId = window.setInterval(() => {
         this.runSync();

@@ -33,7 +33,7 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
 
     // 2. Initialize Status Bar
     this.statusBarItem = this.addStatusBarItem();
-    this.updateStatusBar("就绪", false);
+    this.updateStatusBar(this.settings.syncPaused ? "已暂停" : "就绪", false);
 
     // 3. Initialize Sync Engine
     this.syncEngine = new SyncEngine(
@@ -46,7 +46,7 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
     );
 
     await this.syncEngine.initialize();
-    this.updateStatusBar("就绪", false);
+    this.updateStatusBar(this.settings.syncPaused ? "已暂停" : "就绪", false);
     if (this.syncEngine.getPendingConflicts().length) {
       new Notice(`有 ${this.syncEngine.getPendingConflicts().length} 个同步冲突待人工处理，点击状态栏查看。`,15000);
     }
@@ -102,7 +102,7 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
     this.resetAutoSyncTimer();
 
     // 9. Startup Sync
-    if (this.settings.syncOnStartup && this.settings.accessToken) {
+    if (!this.settings.syncPaused && this.settings.syncOnStartup && this.settings.accessToken) {
       setTimeout(() => {
         this.runSync();
       }, 3000); // Wait 3s after startup for vault index to be fully loaded
@@ -146,6 +146,7 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
   public openConflictReview() { new ConflictReviewModal(this.app, this.syncEngine).open(); }
 
   public async runSync() {
+    if (this.settings.syncPaused) { new Notice("同步已暂停，请先在插件设置中解除暂停。"); return; }
     if (!this.settings.accessToken) {
       new Notice("请先在设置中配置百度网盘 Access Token！");
       return;
@@ -159,7 +160,7 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
       this.autoSyncIntervalId = undefined;
     }
 
-    if (this.settings.autoSync && this.settings.syncIntervalMinutes > 0) {
+    if (!this.settings.syncPaused && this.settings.autoSync && this.settings.syncIntervalMinutes > 0) {
       const intervalMs = this.settings.syncIntervalMinutes * 60 * 1000;
       this.autoSyncIntervalId = window.setInterval(() => {
         this.runSync();

@@ -13,7 +13,6 @@ interface Journal {
  * contract: this provides verified backups and restart recovery, not power-loss
  * durability or an atomic transaction across the vault and remote service. */
 export class AtomicFileSystem {
-  private static locks = new WeakMap<App, Promise<unknown>>();
   readonly transactionDir: string;
 
   constructor(private app: App) {
@@ -21,9 +20,18 @@ export class AtomicFileSystem {
   }
 
   private exclusive<T>(work: () => Promise<T>): Promise<T> {
-    const previous = AtomicFileSystem.locks.get(this.app) || Promise.resolve();
+    // Share locks across plugin module copies/reloads in the same renderer;
+    // instance-local WeakMaps let one writer recover another live journal.
+    const key = Symbol.for("baidu-sync.atomic-lock-registry.v1");
+    type Registry = {apps:WeakMap<object,Promise<unknown>>;paths:Map<string,Promise<unknown>>};
+    const host = globalThis as unknown as {[key:symbol]:Registry};
+    const registry = host[key] ||= {apps:new WeakMap(),paths:new Map()};
+    const native = this.nativeIO();
+    const previous = (native ? registry.paths.get(native.base) : registry.apps.get(this.app)) || Promise.resolve();
     const next = previous.catch(() => undefined).then(work);
-    AtomicFileSystem.locks.set(this.app, next.catch(() => undefined));
+    const settled = next.catch(() => undefined);
+    if (native) registry.paths.set(native.base,settled);
+    else registry.apps.set(this.app,settled);
     return next;
   }
 
@@ -70,7 +78,15 @@ export class AtomicFileSystem {
 
   private async recoverOne(record: string): Promise<boolean> {
     const adapter = this.app.vault.adapter;
-    const j: Journal = JSON.parse(await adapter.read(record));
+    let contents: string;
+    try { contents = await adapter.read(record); }
+    catch (error: any) {
+      if (error?.code !== "ENOENT") throw error;
+      const stem = record.slice(0,-5);
+      if (await adapter.exists(record) || await adapter.exists(stem + ".new") || await adapter.exists(stem + ".old")) throw error;
+      return false; // Entry already fully cleaned; preserve incomplete transactions.
+    }
+    const j: Journal = JSON.parse(contents);
     if (j.version !== 1 || typeof j.target !== "string" ||
         !/^[a-f0-9]{32}$/.test(j.newHash) ||
         !(j.oldHash === null || /^[a-f0-9]{32}$/.test(j.oldHash))) {

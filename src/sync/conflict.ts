@@ -16,6 +16,14 @@ export interface ConflictDecision {
   conflictSubtype?: "both_modified" | "remote_deleted_local_modified" | "local_deleted_remote_modified";
 }
 
+/** Baidu timestamps have second precision; unknown timestamps never qualify. */
+export function sameFileVersion(local: FileStateInspection, remote: FileStateInspection): boolean {
+  return local.exists && remote.exists && !!local.md5 && local.md5 === remote.md5 &&
+    typeof local.mtime === "number" && Number.isFinite(local.mtime) &&
+    typeof remote.mtime === "number" && Number.isFinite(remote.mtime) &&
+    Math.floor(local.mtime / 1000) === Math.floor(remote.mtime / 1000);
+}
+
 /**
  * Perform 3-way delta detection between Local, Remote, and Base snapshot
  */
@@ -24,6 +32,7 @@ export function determineSyncAction(
   remote: FileStateInspection,
   base?: SyncMetadataEntry
 ): ConflictDecision {
+  if (sameFileVersion(local,remote)) return {action:"noop",reason:"Verified identical content and modification time",isConflict:false};
   // Scenario 1: File is in Base snapshot
   if (base) {
     const localChanged = !local.exists || local.md5 !== base.localMd5;
@@ -41,12 +50,12 @@ export function determineSyncAction(
 
     // 1.3 Local deleted, remote unchanged -> delete remote
     if (!local.exists && !remoteChanged) {
-      return { action: "delete_remote", reason: "Deleted locally, clean up remote", isConflict: false };
+      return { action: "conflict", conflictSubtype:"local_deleted_remote_modified", reason: "Local deletion requires human confirmation", isConflict: true };
     }
 
     // 1.4 Remote deleted, local unchanged -> delete local
     if (!remote.exists && !localChanged) {
-      return { action: "delete_local", reason: "Deleted remotely, clean up local", isConflict: false };
+      return { action: "conflict", conflictSubtype:"remote_deleted_local_modified", reason: "Remote deletion requires human confirmation", isConflict: true };
     }
 
     // 1.5 Local changed, remote unchanged

@@ -76,6 +76,19 @@ function ok(value, message) { assert.ok(value, message); checks++; }
     await new AtomicFileSystem(appFor(d)).recoverCrashAndCleanStale();
     assert.deepEqual(d.files, before); checks++;
   }
+  // Stale fully-cleaned journal entries are harmless; orphan payloads are not.
+  for (const orphan of [false, true]) {
+    const d = new Disk(), app = appFor(d), writer = new AtomicFileSystem(app);
+    const record = writer.transactionDir + '/abcdef.json';
+    d.dirs.add(writer.transactionDir);
+    d.list = async () => ({files:[record],folders:[]});
+    const read=d.read.bind(d);
+    d.read=async path=>{if(path===record)throw Object.assign(new Error('gone'),{code:'ENOENT'});return read(path)};
+    if(orphan)d.files.set(writer.transactionDir+'/abcdef.old',enc.encode('preserve'));
+    if(orphan){await assert.rejects(writer.recoverCrashAndCleanStale());assert.equal(d.files.has(writer.transactionDir+'/abcdef.old'),true);}
+    else await writer.recoverCrashAndCleanStale();
+    checks++;
+  }
   // Corrupt temporary payload never touches the old target.
   {
     const d = new Disk(); d.files.set('note.md', enc.encode('old'));
@@ -155,11 +168,76 @@ function ok(value, message) { assert.ok(value, message); checks++; }
     assert.equal(uploads,1);assert.equal(await d.read('note.md'),'local');checks+=2;
     assert.equal(engine.getPendingConflicts()[0].remote.exists,false);checks++;
   }
+  // Identical plaintext and second-precision mtime never create a conflict,
+  // including opaque server hashes. Existing duplicates go to recoverable trash.
+  {
+    const d=new Disk(),app=appFor(d);d.files.set('note.md',enc.encode('same'));
+    const engine=new SyncEngine(app,()=>({}),{downloadFile:async()=>enc.encode('same').buffer,uploadFile:async()=>{throw Error('must not upload')}});
+    const remote={exists:true,fsId:'1',md5:'opaque-server-hash',mtime:1};
+    const local={exists:true,md5:calculateMd5(enc.encode('same')),mtime:1};
+    let decision={action:'conflict'};
+    await engine.resolveConflict('note.md','/note.md',decision,local,remote);
+    assert.equal(decision.action,'noop');assert.equal(engine.getPendingConflicts().length,0);checks+=2;
+    assert.equal(engine.stateStore.get('note.md').remoteMd5,'opaque-server-hash');checks++;
+    // Same bytes with different or missing timestamps still need review.
+    await engine.resolveConflict('note.md','/note.md',{action:'conflict'},local,{...remote,mtime:2000});
+    const record=engine.getPendingConflicts()[0];assert.equal(record.copies.length,1);checks++;
+    const edited='note.conflict-20261019-000000-edited.md';d.files.set(edited,enc.encode('manual edit'));
+    record.copies.push(edited);
+    await engine.resolveConflict('note.md','/note.md',{action:'conflict'},local,remote);
+    assert.equal(engine.getPendingConflicts().length,0);assert.equal(d.files.has(record.copies[0]),false);assert.equal(await d.read(edited),'manual edit');assert.equal(await d.read('note.md'),'same');checks+=4;
+    await engine.resolveConflict('note.md','/note.md',{action:'conflict'},local,{...remote,mtime:undefined});
+    assert.equal(engine.getPendingConflicts().length,1);checks++;
+  }
+  // Conflict-page deletions are local-only, constrained, and retain pending state.
+  {
+    const d=new Disk(),app=appFor(d);d.files.set('note.md',enc.encode('keep'));d.files.set('copy.md',enc.encode('remote'));d.files.set('other.md',enc.encode('other'));
+    let remoteMutations=0;const engine=new SyncEngine(app,()=>({syncPaused:true}),{deleteFile:async()=>{remoteMutations++},uploadFile:async()=>{remoteMutations++}});
+    engine.stateStore.setConflict({path:'note.md',remotePath:'/note.md',copies:['copy.md'],remote:{exists:true},createdAt:1});
+    await assert.rejects(engine.trashConflictFile('note.md','other.md'));assert.equal(await d.read('other.md'),'other');checks++;
+    await engine.trashConflictFile('note.md','copy.md');assert.equal(d.files.has('copy.md'),false);assert.equal(await d.read('note.md'),'keep');checks+=2;
+    await engine.trashConflictFile('note.md','note.md');assert.equal(remoteMutations,0);assert.equal(engine.getPendingConflicts().length,1);checks+=2;
+  }
+  // Merge preserves newer edits and removes pending state only after successful commit.
+  {
+    const d=new Disk(),app=appFor(d);d.files.set('note.md',enc.encode('local'));d.files.set('copy.md',enc.encode('remote'));
+    const engine=new SyncEngine(app,()=>({syncPaused:false}),{});
+    engine.stateStore.setConflict({path:'note.md',remotePath:'/note.md',copies:['copy.md'],remote:{exists:true},createdAt:1});
+    const snapshot=await engine.readConflictMerge('note.md');
+    await assert.rejects(engine.saveConflictMerge('note.md',snapshot,'<<<<<<< LOCAL\na\n=======\nb\n>>>>>>> REMOTE'));checks++;
+    d.files.set('note.md',enc.encode('new edit'));
+    await assert.rejects(engine.saveConflictMerge('note.md',snapshot,'merged'));assert.equal(await d.read('note.md'),'new edit');checks+=2;
+    const fresh=await engine.readConflictMerge('note.md');
+    d.files.set('copy.md',enc.encode('new remote'));
+    await assert.rejects(engine.saveConflictMerge('note.md',fresh,'merged'));checks++;
+    engine.inspectRemoteFile=async()=>({exists:true});
+    engine.executeAction=async()=>{throw Error('network unavailable')};
+    await assert.rejects(engine.saveConflictMerge('note.md',await engine.readConflictMerge('note.md'),'merged'));
+    assert.equal(engine.getPendingConflicts().length,1);checks++;
+    engine.executeAction=async()=>{};
+    await engine.saveConflictMerge('note.md',await engine.readConflictMerge('note.md'),'merged');
+    assert.equal(await d.read('note.md'),'merged');assert.equal(await d.read('copy.md'),'new remote');assert.equal(engine.getPendingConflicts().length,0);checks+=3;
+  }
+  // Batch accepts only selected records, backs up replaced bytes, and keeps failures.
+  {
+    const d=new Disk(),app=appFor(d);d.files.set('one.md',enc.encode('local one'));d.files.set('two.md',enc.encode('local two'));
+    const engine=new SyncEngine(app,()=>({syncPaused:false}),{});
+    for(const path of ['one.md','two.md']) engine.stateStore.setConflict({path,remotePath:'/'+path,copies:[],remote:{exists:true,md5:'remote',fsId:'1'},createdAt:1});
+    engine.inspectRemoteFile=async()=>({exists:true,md5:'remote',fsId:'1'});
+    engine.executeAction=async(path,remote,decision)=>{assert.equal(decision.action,'download');await engine.atomicFs.atomicWrite(path,enc.encode('remote bytes').buffer)};
+    const result=await engine.acceptConflictVersions(['one.md','missing.md','one.md'],'remote');
+    assert.deepEqual(result.resolved,['one.md']);assert.equal(result.failed.length,1);assert.equal(await d.read('one.md'),'remote bytes');assert.equal(await d.read('two.md'),'local two');checks+=4;
+    const backup=[...d.files.keys()].find(p=>p.startsWith('one.conflict-'));assert.equal(await d.read(backup),'local one');assert.equal(engine.getPendingConflicts().length,1);checks+=2;
+    engine.executeAction=async()=>{throw Error('upload failed')};
+    const failed=await engine.acceptConflictVersions(['two.md'],'local');assert.equal(failed.failed.length,1);assert.equal(engine.getPendingConflicts().length,1);checks+=2;
+    engine.executeAction=async()=>{};
+    const done=await engine.acceptConflictVersions(['two.md'],'local');assert.deepEqual(done.resolved,['two.md']);assert.equal(engine.getPendingConflicts().length,0);checks+=2;
+  }
   // Multiple writer instances share a per-vault lock.
   {
     const d = new Disk(), app = appFor(d);
     d.files.set('note.md', enc.encode('old'));
-    await Promise.all([new AtomicFileSystem(app).atomicWrite('note.md', 'first'), new AtomicFileSystem(app).atomicWrite('note.md', 'second')]);
+    await Promise.all([new AtomicFileSystem(app).atomicWrite('note.md', 'first'), new (load('src/utils/atomic.ts').AtomicFileSystem)(app).atomicWrite('note.md', 'second')]);
     assert.equal(await d.read('note.md'), 'second'); checks++;
   }
   // Invalid journals and externally changed targets block writes without cleanup.

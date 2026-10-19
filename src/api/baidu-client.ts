@@ -175,54 +175,50 @@ export class BaiduClient {
   /**
    * List files under remote directory (supports recursion and pagination)
    */
-  public async listFiles(dirPath: string, recursion: boolean = true): Promise<RemoteFileInfo[]> {
+  public async listFiles(dirPath: string, recursion: boolean = true, shouldYield?:()=>boolean): Promise<RemoteFileInfo[]> {
     const token = await this.ensureFreshToken();
-    const result: RemoteFileInfo[] = [];
-    let start = 0;
+    const root = dirPath.replace(/\/$/, "") || "/";
+    const directories = [root];
+    const visited = new Set<string>();
+    const result = new Map<string, RemoteFileInfo>();
     const limit = 1000;
-    let hasMore = true;
-
-    while (hasMore) {
-      const url = `https://pan.baidu.com/rest/2.0/xpan/file?method=list&dir=${encodeURIComponent(
-        dirPath
-      )}&recursion=${recursion ? 1 : 0}&start=${start}&limit=${limit}&web=1&access_token=${token}`;
-
-      const res = await requestUrl({
-        url,
-        method: "GET",
-      });
-
-      const data = res.json;
-      if (data.errno === -9) {
-        // Directory does not exist yet
-        return [];
-      }
-      if (data.errno !== 0) {
-        throw new Error(`Baidu list error (errno: ${data.errno}) for dir "${dirPath}"`);
-      }
-
-      if (Array.isArray(data.list)) {
-        for (const item of data.list) {
-          result.push({
-            fsId: String(item.fs_id),
-            path: item.path,
-            serverFilename: item.server_filename,
-            size: Number(item.size || 0),
-            md5: item.md5 ? String(item.md5).toLowerCase() : undefined,
-            serverMtime: Number(item.server_mtime || 0) * 1000, // convert sec to ms
-            isdir: Number(item.isdir || 0),
-          });
+    for (let cursor = 0; cursor < directories.length; cursor++) {
+      const directory = directories[cursor];
+      if (visited.has(directory)) continue;
+      visited.add(directory);
+      let start = 0;
+      const pages = new Set<string>();
+      while (true) {
+        if(shouldYield?.()) throw new Error("SYNC_YIELD_FOR_CONFLICT");
+        // method=list is single-directory only; recursion=1 is ignored by Baidu.
+        const url = `https://pan.baidu.com/rest/2.0/xpan/file?method=list&dir=${encodeURIComponent(directory)}&start=${start}&limit=${limit}&web=1&access_token=${token}`;
+        const data = (await requestUrl({url, method:"GET"})).json;
+        if (data.errno === -9 && directory === root && start === 0) return [];
+        if (data.errno !== 0 || !Array.isArray(data.list)) {
+          throw new Error(`远端目录枚举不完整，已停止同步: ${directory} (errno: ${data.errno})`);
         }
-      }
-
-      if (data.has_more === 1 && data.list && data.list.length > 0) {
+        const signature = JSON.stringify(data.list.map((item: any) => item.path));
+        if (data.list.length && pages.has(signature)) throw new Error("远端分页重复，已停止同步以防止误判删除");
+        pages.add(signature);
+        for (const item of data.list) {
+          const prefix = directory === "/" ? "/" : directory + "/";
+          if (typeof item.path !== "string" || !item.path.startsWith(prefix) ||
+              !item.path.slice(prefix.length) || item.path.slice(prefix.length).includes("/")) {
+            throw new Error("远端目录返回了越界文件，已停止同步");
+          }
+          result.set(item.path, {fsId:String(item.fs_id),path:item.path,
+            serverFilename:item.server_filename,size:Number(item.size || 0),
+            md5:item.md5 ? String(item.md5).toLowerCase() : undefined,
+            serverMtime:Number(item.server_mtime || 0)*1000,isdir:Number(item.isdir || 0)});
+          if (recursion && Number(item.isdir) === 1 && !visited.has(item.path)) directories.push(item.path);
+        }
+        // list often omits has_more. A full page requires another request.
+        if (data.has_more !== 1 && data.list.length < limit) break;
+        if (!data.list.length) throw new Error("远端分页缺少内容，已停止同步");
         start += data.list.length;
-      } else {
-        hasMore = false;
       }
     }
-
-    return result;
+    return [...result.values()];
   }
 
   /**

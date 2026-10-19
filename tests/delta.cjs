@@ -19,5 +19,10 @@ const b=esbuild.buildSync({entryPoints:['src/sync/engine.ts'],bundle:true,platfo
  engine.inspectLocalFile=async()=>({exists:true,md5:'same'});
  engine.inspectRemoteFile=async()=>({exists:true,md5:'remote-edit',fsId:'x'});
  await engine.syncSingleFile('0.md');assert.equal(actions.at(-1),'download');
+ // Pausing blocks both full sync and local-change jobs, including remote IO.
+ engine.getSettings=()=>({accessToken:'test',remoteBasePath:'/test',syncPaused:true});
+ const before={listings,saves,actions:actions.length};
+ await engine.runFullSync();await engine.syncSingleFile('0.md',true);
+ assert.deepEqual({listings,saves,actions:actions.length},before);
  console.log('PASS: 100 unchanged files = one listing, zero uploads/creates/checkpoints; identical local saves = zero network; local and remote edits still sync');
 })().catch(e=>{console.error(e);process.exitCode=1});

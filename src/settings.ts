@@ -13,6 +13,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   username: "",
   remoteBasePath: "/apps/obsidian-vault",
   autoSync: false,
+  syncPaused: false,
   uploadConcurrency: 3,
   syncIntervalMinutes: 15,
   syncOnStartup: true,
@@ -418,6 +419,15 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
+
+    new Setting(containerEl).setName("暂停所有同步")
+      .setDesc("暂停全量、定时、本地修改同步和冲突提交；已开始的单个文件操作完成后停止。")
+      .addToggle(t => t.setValue(this.plugin.settings.syncPaused).onChange(async value => {
+        this.plugin.settings.syncPaused = value;
+        await this.plugin.saveSettings();
+        this.plugin.resetAutoSyncTimer();
+        this.plugin.updateStatusBar(value ? "已暂停" : "就绪",false);
+      }));
 
     // --- Section 6: Actions & Logs ---
     new Setting(containerEl).setName("6. 手动操作与日志 (Actions & Logs)").setHeading();

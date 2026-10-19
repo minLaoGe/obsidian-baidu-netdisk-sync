@@ -1,0 +1,11 @@
+const assert=require('node:assert/strict'),esbuild=require('esbuild');
+const bundle=esbuild.buildSync({entryPoints:['src/sync/merge.ts'],bundle:true,platform:'node',format:'cjs',write:false});const m={exports:{}};new Function('module','exports',bundle.outputFiles[0].text)(m,m.exports);const {mergeText,hasConflictMarkers}=m.exports;
+assert.equal(mergeText('same\n','same\n').merged,'same\n');
+const result=mergeText('start\nlocal\nend','start\nremote\nend');
+assert.equal(result.diff,'  start\n- local\n+ remote\n  end');
+assert.equal(result.merged,'start\n<<<<<<< LOCAL\nlocal\n=======\nremote\n>>>>>>> REMOTE\nend');
+assert(hasConflictMarkers(result.merged));assert(!hasConflictMarkers('resolved\n'));
+assert(mergeText('a\nx\nb\ny\nc','a\nX\nb\nY\nc').merged.match(/<<<<<<< LOCAL/g).length===2);
+assert(mergeText('','added').diff.includes('+ added'));
+const large=Array.from({length:1100},(_,i)=>String(i)).join('\n');assert(hasConflictMarkers(mergeText(large,large+'\nnew').merged));
+console.log('PASS: line diff, conflict blocks, identical content, empty side, bounded large-file fallback');

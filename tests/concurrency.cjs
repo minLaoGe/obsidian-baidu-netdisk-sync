@@ -24,7 +24,7 @@ const delay=ms=>new Promise(r=>setTimeout(r,ms));
   engine.stateStore={getAll:()=>({'delete.md':{localMd5:'local',remoteMd5:'remote'}}),setLastFullSyncTimestamp:()=>{},save:()=>{saveTail=saveTail.then(async()=>{assert.equal(saving,0);saving++;await delay(1);saving--;saved++});return saveTail;}};
   engine.inspectLocalFile=async path=>path==='delete.md'?{exists:false}:{exists:true,md5:'local',size:8};
   engine.executeAction=async(path,remote,decision)=>{
-   if(decision.action==='delete_remote'){assert.equal(active,0);deleted=true;return;}
+   if(decision.action==='conflict'){assert.equal(active,0);deleted=true;return;}
    assert.equal(deleted,false);active++;peak=Math.max(peak,active);
    await delay(path==='a.md'?12:5);active--;
    if(path==='failed.md')throw Error('injected upload failure');
@@ -46,6 +46,21 @@ const delay=ms=>new Promise(r=>setTimeout(r,ms));
   await delay(1);
   const single=engine.syncMutex.acquire(async()=>{assert.equal(inFlight,0);assert.equal(secondFinished,true);singleStarted=true;});
   await Promise.all([full,single]);assert.equal(singleStarted,true);
+ }
+ // Interactive conflict requests drain in-flight work, skip the remaining full plan, then acquire safely.
+ {
+  let started=0,release,firstStarted;
+  const gate=new Promise(r=>release=r), ready=new Promise(r=>firstStarted=r);
+  const app={vault:{configDir:'.custom',adapter:{},getFiles:()=>['a','b','c'].map(path=>({path}))}};
+  const engine=new SyncEngine(app,()=>({accessToken:'test',remoteBasePath:'/test',uploadConcurrency:1,ignoredPatterns:[]}),{createDirectory:async()=>{},listFiles:async()=>[]});
+  engine.log=()=>{};engine.stateStore={getAll:()=>({}),save:async()=>{},setLastFullSyncTimestamp:()=>{},getConflicts:()=>[{path:'conflict.md',copies:[]}]};
+  engine.inspectLocalFile=async()=>({exists:true,md5:'local'});
+  engine.executeAction=async()=>{started++;firstStarted();await gate;};
+  const full=engine.runFullSync();await ready;
+  let committed=false;engine.commitConflictResolution=async()=>{assert.equal(started,1);committed=true};
+  const batch=engine.acceptConflictVersions(['conflict.md'],'local');await delay(1);assert.equal(committed,false);
+  release();await full;const result=await batch;
+  assert.equal(started,1);assert.equal(committed,true);assert.deepEqual(result.resolved,['conflict.md']);assert.equal(engine.interactiveConflictRequests,0);
  }
  console.log('PASS: bounded uploads, drain on failure, serialized checkpoints, failed baselines, deletion barriers, full/single sync isolation');
 })().catch(e=>{console.error(e);process.exitCode=1});
