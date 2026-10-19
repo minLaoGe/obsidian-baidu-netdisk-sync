@@ -22,6 +22,7 @@ export interface PluginSettings {
   uploadConcurrency: number; // 1–5 different files; per-file upload phases remain ordered
   downloadConcurrency?: number; // 1–5 different files; per-file download phases remain ordered
   syncIntervalMinutes: number;
+  syncIntervalSeconds?: number;
   syncOnStartup: boolean;
   syncOnModifyDebounceSeconds: number; // Debounce delay before syncing modified files
   
@@ -59,12 +60,13 @@ export interface RemoteFileInfo {
 export interface SyncMetadataEntry {
   path: string;            // relative vault path e.g. "Notes/Daily.md"
   localMtime: number;      // local file mtime in ms
+  localSize?: number;      // local file size in bytes for zero-IO fast-path
   localMd5: string;        // local content md5 hex
   remoteFsId: string;      // remote Baidu Netdisk fs_id
   remoteMtime: number;     // remote server mtime in ms
   remoteMd5: string;       // remote content md5
   lastSyncTime: number;    // timestamp ms when last synced
-  revision: number;        // monotonically increasing sequence number
+  revision?: number;       // monotonically increasing sequence number
 }
 
 export interface PendingConflict {

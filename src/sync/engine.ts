@@ -155,7 +155,7 @@ export class SyncEngine {
     if (!(file instanceof TFile)) return;
     if (this.shouldIgnore(file.path)) return;
 
-    const debounceSeconds = this.getSettings().syncOnModifyDebounceSeconds || 3;
+    const debounceSeconds = Math.max(3, this.getSettings().syncOnModifyDebounceSeconds || 3);
     this.debounceManager.debounce(file.path, debounceSeconds * 1000, () => {
       this.taskQueue.enqueue(async () => {
         await this.syncSingleFile(file.path, true);
@@ -190,8 +190,11 @@ export class SyncEngine {
 
         const remotePath = toRemotePath(settings.remoteBasePath, vaultPath);
         const base = this.stateStore.get(vaultPath);
-
-        const localInspection = await this.inspectLocalFile(vaultPath);
+        const cachedAbstract = typeof this.app.vault.getAbstractFileByPath === "function"
+          ? this.app.vault.getAbstractFileByPath(vaultPath)
+          : undefined;
+        const cachedFile = cachedAbstract instanceof TFile ? cachedAbstract : undefined;
+        const localInspection = await this.inspectLocalFile(vaultPath, cachedFile, base);
         // Event-driven jobs only need to push local changes. Full sync still
         // checks remote edits; identical-content saves need no network request.
         if (localChangeOnly && base && localInspection.exists && localInspection.md5 === base.localMd5) {
@@ -291,13 +294,16 @@ export class SyncEngine {
         for (const path of allPaths) {
           if(this.interactiveConflictRequests) break;
           const totalPlanned = uploads.length + downloads.length + serial.length;
-          this.setStatus(`检查本地变更 (${totalPlanned + completed + 1}/${allPaths.size})`, true);
+          const currentCount = totalPlanned + completed + 1;
+          if (currentCount % 25 === 0 || currentCount === allPaths.size || totalPlanned > 0) {
+            this.setStatus(`检查本地变更 (${currentCount}/${allPaths.size})`, true);
+          }
           try {
             if (this.shouldIgnore(path)) { completed++; result.skipped++; continue; }
             const remotePath = toRemotePath(settings.remoteBasePath, path);
             const base = baseEntries[path];
             const localFile = localMap.get(path);
-            let localInspection = await this.inspectLocalFile(path, localFile);
+            let localInspection = await this.inspectLocalFile(path, localFile, base);
             const remoteItem = remoteMap.get(path);
             let remoteInspection: FileStateInspection = remoteItem
               ? { exists: true, mtime: remoteItem.serverMtime, md5: remoteItem.md5,
@@ -479,6 +485,7 @@ export class SyncEngine {
         this.stateStore.set(localPath, {
           path: localPath,
           localMtime: local.mtime || Date.now(),
+          localSize: local.size,
           localMd5: localRawMd5,
           remoteFsId: uploadResult.fsId,
           remoteMtime: Date.now(),
@@ -512,6 +519,7 @@ export class SyncEngine {
         this.stateStore.set(localPath, {
           path: localPath,
           localMtime: newStat ? newStat.mtime : Date.now(),
+          localSize: newStat ? newStat.size : (remote.size ?? data.byteLength),
           localMd5: decryptedMd5,
           remoteFsId: remote.fsId,
           remoteMtime: remote.mtime || Date.now(),
@@ -559,6 +567,7 @@ export class SyncEngine {
       this.stateStore.set(path, {
         path,
         localMtime: local.mtime ?? 0,
+        localSize: local.size,
         localMd5: local.md5!,
         remoteFsId: remote.fsId,
         remoteMtime: remote.mtime ?? 0,
@@ -605,6 +614,7 @@ export class SyncEngine {
           this.stateStore.set(conflict.path, {
             path: conflict.path,
             localMtime: local.mtime!,
+            localSize: local.size,
             localMd5: local.md5,
             remoteFsId: conflict.remote.fsId,
             remoteMtime: conflict.remote.mtime || local.mtime!,
@@ -650,6 +660,7 @@ export class SyncEngine {
         this.stateStore.set(localPath, {
           path: localPath,
           localMtime: current.mtime!,
+          localSize: current.size,
           localMd5: current.md5!,
           remoteFsId: remote.fsId,
           remoteMtime: remote.mtime!,
@@ -877,20 +888,57 @@ export class SyncEngine {
       if(!this.interactiveConflictRequests) new Notice(`冲突已解决并同步，已从列表移除：${path}`);
   }
 
-  private async inspectLocalFile(vaultPath: string, cachedFile?: TFile): Promise<FileStateInspection> {
+  private async inspectLocalFile(vaultPath: string, cachedFile?: TFile, base?: SyncMetadataEntry): Promise<FileStateInspection> {
+    // 1. Fast-path: in-memory cachedFile metadata check (0ms, 0 disk I/O, 0 hashing)
+    if (cachedFile && base && base.localMd5 && typeof base.localMtime === "number") {
+      const cachedMtime = cachedFile.stat ? cachedFile.stat.mtime : 0;
+      const cachedSize = cachedFile.stat ? cachedFile.stat.size : undefined;
+      if (
+        cachedMtime > 0 &&
+        cachedMtime === base.localMtime &&
+        (base.localSize === undefined || cachedSize === undefined || cachedSize === base.localSize)
+      ) {
+        return {
+          exists: true,
+          mtime: cachedMtime,
+          size: cachedSize !== undefined ? cachedSize : base.localSize,
+          md5: base.localMd5,
+        };
+      }
+    }
+
     const adapter = this.app.vault.adapter;
-    const exists = await adapter.exists(vaultPath);
+    const exists = cachedFile ? true : await adapter.exists(vaultPath);
     if (!exists) {
       return { exists: false };
     }
 
     const stat = await adapter.stat(vaultPath);
+    const mtime = stat ? stat.mtime : cachedFile ? cachedFile.stat.mtime : Date.now();
+    const size = stat ? stat.size : cachedFile ? cachedFile.stat.size : undefined;
+
+    // 2. Fast-path: disk stat check before reading whole binary content into memory
+    if (
+      base &&
+      base.localMd5 &&
+      typeof base.localMtime === "number" &&
+      mtime === base.localMtime &&
+      (base.localSize === undefined || size === undefined || size === base.localSize)
+    ) {
+      return {
+        exists: true,
+        mtime: mtime,
+        size: size !== undefined ? size : base.localSize,
+        md5: base.localMd5,
+      };
+    }
+
     const buffer = await adapter.readBinary(vaultPath);
     const md5 = calculateMd5(buffer);
 
     return {
       exists: true,
-      mtime: stat ? stat.mtime : cachedFile ? cachedFile.stat.mtime : Date.now(),
+      mtime: mtime,
       size: stat ? stat.size : buffer.byteLength,
       md5: md5,
     };

@@ -19,6 +19,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   uploadConcurrency: 3,
   downloadConcurrency: 3,
   syncIntervalMinutes: 15,
+  syncIntervalSeconds: 900,
   syncOnStartup: true,
   syncOnModifyDebounceSeconds: 3,
   conflictStrategy: "git_merge",
@@ -374,17 +375,20 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
           })
       );
 
+    const currentIntervalSec = this.plugin.settings.syncIntervalSeconds ?? (this.plugin.settings.syncIntervalMinutes * 60);
     new Setting(containerEl)
-      .setName("自动同步间隔 (分钟)")
-      .setDesc("每隔多少分钟自动执行一次后台同步比对")
+      .setName("自动同步间隔 (秒)")
+      .setDesc("后台自动触发全量同步的周期，最短支持 10 秒（建议 60 秒以上）")
       .addText((text) =>
         text
-          .setPlaceholder("15")
-          .setValue(String(this.plugin.settings.syncIntervalMinutes))
+          .setPlaceholder("900")
+          .setValue(String(currentIntervalSec))
           .onChange(async (val) => {
             const num = parseInt(val, 10);
-            if (!isNaN(num) && num > 0) {
-              this.plugin.settings.syncIntervalMinutes = num;
+            if (!isNaN(num)) {
+              const clamped = Math.max(10, num);
+              this.plugin.settings.syncIntervalSeconds = clamped;
+              this.plugin.settings.syncIntervalMinutes = Math.max(1, Math.round(clamped / 60));
               await this.plugin.saveSettings();
               this.plugin.resetAutoSyncTimer();
             }
@@ -393,15 +397,15 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("编辑防抖延迟 (秒)")
-      .setDesc("本地编辑文件后等待停止输入的缓冲时间（保证严格 FIFO 时序，避免打字期间高频并发请求）")
+      .setDesc("本地编辑文件后等待停止输入的缓冲时间（最少 3 秒，避免打字期间高频并发请求）")
       .addText((text) =>
         text
           .setPlaceholder("3")
-          .setValue(String(this.plugin.settings.syncOnModifyDebounceSeconds))
+          .setValue(String(Math.max(3, this.plugin.settings.syncOnModifyDebounceSeconds || 3)))
           .onChange(async (val) => {
             const num = parseInt(val, 10);
-            if (!isNaN(num) && num >= 1) {
-              this.plugin.settings.syncOnModifyDebounceSeconds = num;
+            if (!isNaN(num)) {
+              this.plugin.settings.syncOnModifyDebounceSeconds = Math.max(3, num);
               await this.plugin.saveSettings();
             }
           })

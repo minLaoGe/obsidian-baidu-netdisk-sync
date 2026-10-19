@@ -15,6 +15,7 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
   private startupSyncTimeoutId?: number;
   private mobileProgress?: MobileSyncProgress;
   private manualSync?: Promise<void>;
+  private lastSyncCompletedAt: number = 0;
 
   async onload() {
     console.log("Loading Baidu Netdisk Sync Plugin...");
@@ -169,10 +170,22 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
       new Notice("请先在设置中配置百度网盘 Access Token！");
       return;
     }
+    const now = Date.now();
+    if (!forceFull && this.lastSyncCompletedAt && (now - this.lastSyncCompletedAt < 10000)) {
+      const remainingSec = Math.ceil((10000 - (now - this.lastSyncCompletedAt)) / 1000);
+      new Notice(`全量同步冷却中（剩余 ${remainingSec} 秒）`);
+      return;
+    }
     this.openSyncProgress();
     if (this.manualSync) return this.manualSync;
     const task = this.syncEngine.runFullSync(forceFull).then(() => {}); this.manualSync = task;
-    try { await task; } finally { if (this.manualSync === task) this.manualSync = undefined; this.mobileProgress?.update(); }
+    try {
+      await task;
+      this.lastSyncCompletedAt = Date.now();
+    } finally {
+      if (this.manualSync === task) this.manualSync = undefined;
+      this.mobileProgress?.update();
+    }
   }
 
   public resetAutoSyncTimer() {
@@ -185,12 +198,16 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
       this.autoSyncIntervalId = undefined;
     }
 
-    if (!(Platform.isMobile && this.settings.mobileManualSync) && !this.settings.syncPaused && this.settings.autoSync && this.settings.syncIntervalMinutes > 0) {
-      const intervalMs = this.settings.syncIntervalMinutes * 60 * 1000;
+    const intervalSec = this.settings.syncIntervalSeconds
+      ? Math.max(10, this.settings.syncIntervalSeconds)
+      : Math.max(10, (this.settings.syncIntervalMinutes || 15) * 60);
+
+    if (!(Platform.isMobile && this.settings.mobileManualSync) && !this.settings.syncPaused && this.settings.autoSync && intervalSec >= 10) {
+      const intervalMs = intervalSec * 1000;
       this.autoSyncIntervalId = window.setInterval(() => {
         if (!(Platform.isMobile && this.settings.mobileManualSync) && !this.settings.syncPaused) void this.runSync();
       }, intervalMs);
-      console.log(`Auto sync scheduled every ${this.settings.syncIntervalMinutes} minutes.`);
+      console.log(`Auto sync scheduled every ${intervalSec} seconds.`);
     }
   }
 }

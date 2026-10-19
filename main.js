@@ -1100,6 +1100,7 @@ var DEFAULT_SETTINGS = {
   uploadConcurrency: 3,
   downloadConcurrency: 3,
   syncIntervalMinutes: 15,
+  syncIntervalSeconds: 900,
   syncOnStartup: true,
   syncOnModifyDebounceSeconds: 3,
   conflictStrategy: "git_merge",
@@ -1337,21 +1338,24 @@ var BaiduSyncSettingTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("\u81EA\u52A8\u540C\u6B65\u95F4\u9694 (\u5206\u949F)").setDesc("\u6BCF\u9694\u591A\u5C11\u5206\u949F\u81EA\u52A8\u6267\u884C\u4E00\u6B21\u540E\u53F0\u540C\u6B65\u6BD4\u5BF9").addText(
-      (text) => text.setPlaceholder("15").setValue(String(this.plugin.settings.syncIntervalMinutes)).onChange(async (val) => {
+    const currentIntervalSec = this.plugin.settings.syncIntervalSeconds ?? this.plugin.settings.syncIntervalMinutes * 60;
+    new import_obsidian3.Setting(containerEl).setName("\u81EA\u52A8\u540C\u6B65\u95F4\u9694 (\u79D2)").setDesc("\u540E\u53F0\u81EA\u52A8\u89E6\u53D1\u5168\u91CF\u540C\u6B65\u7684\u5468\u671F\uFF0C\u6700\u77ED\u652F\u6301 10 \u79D2\uFF08\u5EFA\u8BAE 60 \u79D2\u4EE5\u4E0A\uFF09").addText(
+      (text) => text.setPlaceholder("900").setValue(String(currentIntervalSec)).onChange(async (val) => {
         const num = parseInt(val, 10);
-        if (!isNaN(num) && num > 0) {
-          this.plugin.settings.syncIntervalMinutes = num;
+        if (!isNaN(num)) {
+          const clamped = Math.max(10, num);
+          this.plugin.settings.syncIntervalSeconds = clamped;
+          this.plugin.settings.syncIntervalMinutes = Math.max(1, Math.round(clamped / 60));
           await this.plugin.saveSettings();
           this.plugin.resetAutoSyncTimer();
         }
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("\u7F16\u8F91\u9632\u6296\u5EF6\u8FDF (\u79D2)").setDesc("\u672C\u5730\u7F16\u8F91\u6587\u4EF6\u540E\u7B49\u5F85\u505C\u6B62\u8F93\u5165\u7684\u7F13\u51B2\u65F6\u95F4\uFF08\u4FDD\u8BC1\u4E25\u683C FIFO \u65F6\u5E8F\uFF0C\u907F\u514D\u6253\u5B57\u671F\u95F4\u9AD8\u9891\u5E76\u53D1\u8BF7\u6C42\uFF09").addText(
-      (text) => text.setPlaceholder("3").setValue(String(this.plugin.settings.syncOnModifyDebounceSeconds)).onChange(async (val) => {
+    new import_obsidian3.Setting(containerEl).setName("\u7F16\u8F91\u9632\u6296\u5EF6\u8FDF (\u79D2)").setDesc("\u672C\u5730\u7F16\u8F91\u6587\u4EF6\u540E\u7B49\u5F85\u505C\u6B62\u8F93\u5165\u7684\u7F13\u51B2\u65F6\u95F4\uFF08\u6700\u5C11 3 \u79D2\uFF0C\u907F\u514D\u6253\u5B57\u671F\u95F4\u9AD8\u9891\u5E76\u53D1\u8BF7\u6C42\uFF09").addText(
+      (text) => text.setPlaceholder("3").setValue(String(Math.max(3, this.plugin.settings.syncOnModifyDebounceSeconds || 3))).onChange(async (val) => {
         const num = parseInt(val, 10);
-        if (!isNaN(num) && num >= 1) {
-          this.plugin.settings.syncOnModifyDebounceSeconds = num;
+        if (!isNaN(num)) {
+          this.plugin.settings.syncOnModifyDebounceSeconds = Math.max(3, num);
           await this.plugin.saveSettings();
         }
       })
@@ -2354,7 +2358,7 @@ var SyncEngine = class {
     if (this.automaticSyncBlocked()) return;
     if (!(file instanceof import_obsidian5.TFile)) return;
     if (this.shouldIgnore(file.path)) return;
-    const debounceSeconds = this.getSettings().syncOnModifyDebounceSeconds || 3;
+    const debounceSeconds = Math.max(3, this.getSettings().syncOnModifyDebounceSeconds || 3);
     this.debounceManager.debounce(file.path, debounceSeconds * 1e3, () => {
       this.taskQueue.enqueue(async () => {
         await this.syncSingleFile(file.path, true);
@@ -2384,7 +2388,9 @@ var SyncEngine = class {
         if (this.disposed || !settings.accessToken || settings.syncPaused || localChangeOnly && this.automaticSyncBlocked()) return;
         const remotePath = toRemotePath(settings.remoteBasePath, vaultPath);
         const base = this.stateStore.get(vaultPath);
-        const localInspection = await this.inspectLocalFile(vaultPath);
+        const cachedAbstract = typeof this.app.vault.getAbstractFileByPath === "function" ? this.app.vault.getAbstractFileByPath(vaultPath) : void 0;
+        const cachedFile = cachedAbstract instanceof import_obsidian5.TFile ? cachedAbstract : void 0;
+        const localInspection = await this.inspectLocalFile(vaultPath, cachedFile, base);
         if (localChangeOnly && base && localInspection.exists && localInspection.md5 === base.localMd5) {
           return;
         }
@@ -2469,7 +2475,10 @@ var SyncEngine = class {
         for (const path of allPaths) {
           if (this.interactiveConflictRequests) break;
           const totalPlanned = uploads.length + downloads.length + serial.length;
-          this.setStatus(`\u68C0\u67E5\u672C\u5730\u53D8\u66F4 (${totalPlanned + completed + 1}/${allPaths.size})`, true);
+          const currentCount = totalPlanned + completed + 1;
+          if (currentCount % 25 === 0 || currentCount === allPaths.size || totalPlanned > 0) {
+            this.setStatus(`\u68C0\u67E5\u672C\u5730\u53D8\u66F4 (${currentCount}/${allPaths.size})`, true);
+          }
           try {
             if (this.shouldIgnore(path)) {
               completed++;
@@ -2479,7 +2488,7 @@ var SyncEngine = class {
             const remotePath = toRemotePath(settings.remoteBasePath, path);
             const base = baseEntries[path];
             const localFile = localMap.get(path);
-            let localInspection = await this.inspectLocalFile(path, localFile);
+            let localInspection = await this.inspectLocalFile(path, localFile, base);
             const remoteItem = remoteMap.get(path);
             let remoteInspection = remoteItem ? {
               exists: true,
@@ -2647,6 +2656,7 @@ var SyncEngine = class {
         this.stateStore.set(localPath, {
           path: localPath,
           localMtime: local.mtime || Date.now(),
+          localSize: local.size,
           localMd5: localRawMd5,
           remoteFsId: uploadResult.fsId,
           remoteMtime: Date.now(),
@@ -2672,6 +2682,7 @@ var SyncEngine = class {
         this.stateStore.set(localPath, {
           path: localPath,
           localMtime: newStat ? newStat.mtime : Date.now(),
+          localSize: newStat ? newStat.size : remote.size ?? data.byteLength,
           localMd5: decryptedMd5,
           remoteFsId: remote.fsId,
           remoteMtime: remote.mtime || Date.now(),
@@ -2711,6 +2722,7 @@ var SyncEngine = class {
       this.stateStore.set(path, {
         path,
         localMtime: local.mtime ?? 0,
+        localSize: local.size,
         localMd5: local.md5,
         remoteFsId: remote.fsId,
         remoteMtime: remote.mtime ?? 0,
@@ -2759,6 +2771,7 @@ var SyncEngine = class {
           this.stateStore.set(conflict.path, {
             path: conflict.path,
             localMtime: local.mtime,
+            localSize: local.size,
             localMd5: local.md5,
             remoteFsId: conflict.remote.fsId,
             remoteMtime: conflict.remote.mtime || local.mtime,
@@ -2798,6 +2811,7 @@ var SyncEngine = class {
         this.stateStore.set(localPath, {
           path: localPath,
           localMtime: current.mtime,
+          localSize: current.size,
           localMd5: current.md5,
           remoteFsId: remote.fsId,
           remoteMtime: remote.mtime,
@@ -3051,18 +3065,40 @@ var SyncEngine = class {
     this.setStatus("\u51B2\u7A81\u5DF2\u5904\u7406", false);
     if (!this.interactiveConflictRequests) new import_obsidian5.Notice(`\u51B2\u7A81\u5DF2\u89E3\u51B3\u5E76\u540C\u6B65\uFF0C\u5DF2\u4ECE\u5217\u8868\u79FB\u9664\uFF1A${path}`);
   }
-  async inspectLocalFile(vaultPath, cachedFile) {
+  async inspectLocalFile(vaultPath, cachedFile, base) {
+    if (cachedFile && base && base.localMd5 && typeof base.localMtime === "number") {
+      const cachedMtime = cachedFile.stat ? cachedFile.stat.mtime : 0;
+      const cachedSize = cachedFile.stat ? cachedFile.stat.size : void 0;
+      if (cachedMtime > 0 && cachedMtime === base.localMtime && (base.localSize === void 0 || cachedSize === void 0 || cachedSize === base.localSize)) {
+        return {
+          exists: true,
+          mtime: cachedMtime,
+          size: cachedSize !== void 0 ? cachedSize : base.localSize,
+          md5: base.localMd5
+        };
+      }
+    }
     const adapter = this.app.vault.adapter;
-    const exists = await adapter.exists(vaultPath);
+    const exists = cachedFile ? true : await adapter.exists(vaultPath);
     if (!exists) {
       return { exists: false };
     }
     const stat = await adapter.stat(vaultPath);
+    const mtime = stat ? stat.mtime : cachedFile ? cachedFile.stat.mtime : Date.now();
+    const size = stat ? stat.size : cachedFile ? cachedFile.stat.size : void 0;
+    if (base && base.localMd5 && typeof base.localMtime === "number" && mtime === base.localMtime && (base.localSize === void 0 || size === void 0 || size === base.localSize)) {
+      return {
+        exists: true,
+        mtime,
+        size: size !== void 0 ? size : base.localSize,
+        md5: base.localMd5
+      };
+    }
     const buffer = await adapter.readBinary(vaultPath);
     const md5 = calculateMd5(buffer);
     return {
       exists: true,
-      mtime: stat ? stat.mtime : cachedFile ? cachedFile.stat.mtime : Date.now(),
+      mtime,
       size: stat ? stat.size : buffer.byteLength,
       md5
     };
@@ -3274,6 +3310,7 @@ var BaiduNetdiskSyncPlugin = class extends import_obsidian7.Plugin {
   constructor() {
     super(...arguments);
     this.settings = DEFAULT_SETTINGS;
+    this.lastSyncCompletedAt = 0;
   }
   async onload() {
     console.log("Loading Baidu Netdisk Sync Plugin...");
@@ -3408,6 +3445,12 @@ var BaiduNetdiskSyncPlugin = class extends import_obsidian7.Plugin {
       new import_obsidian7.Notice("\u8BF7\u5148\u5728\u8BBE\u7F6E\u4E2D\u914D\u7F6E\u767E\u5EA6\u7F51\u76D8 Access Token\uFF01");
       return;
     }
+    const now = Date.now();
+    if (!forceFull && this.lastSyncCompletedAt && now - this.lastSyncCompletedAt < 1e4) {
+      const remainingSec = Math.ceil((1e4 - (now - this.lastSyncCompletedAt)) / 1e3);
+      new import_obsidian7.Notice(`\u5168\u91CF\u540C\u6B65\u51B7\u5374\u4E2D\uFF08\u5269\u4F59 ${remainingSec} \u79D2\uFF09`);
+      return;
+    }
     this.openSyncProgress();
     if (this.manualSync) return this.manualSync;
     const task = this.syncEngine.runFullSync(forceFull).then(() => {
@@ -3415,6 +3458,7 @@ var BaiduNetdiskSyncPlugin = class extends import_obsidian7.Plugin {
     this.manualSync = task;
     try {
       await task;
+      this.lastSyncCompletedAt = Date.now();
     } finally {
       if (this.manualSync === task) this.manualSync = void 0;
       this.mobileProgress?.update();
@@ -3429,12 +3473,13 @@ var BaiduNetdiskSyncPlugin = class extends import_obsidian7.Plugin {
       window.clearInterval(this.autoSyncIntervalId);
       this.autoSyncIntervalId = void 0;
     }
-    if (!(import_obsidian7.Platform.isMobile && this.settings.mobileManualSync) && !this.settings.syncPaused && this.settings.autoSync && this.settings.syncIntervalMinutes > 0) {
-      const intervalMs = this.settings.syncIntervalMinutes * 60 * 1e3;
+    const intervalSec = this.settings.syncIntervalSeconds ? Math.max(10, this.settings.syncIntervalSeconds) : Math.max(10, (this.settings.syncIntervalMinutes || 15) * 60);
+    if (!(import_obsidian7.Platform.isMobile && this.settings.mobileManualSync) && !this.settings.syncPaused && this.settings.autoSync && intervalSec >= 10) {
+      const intervalMs = intervalSec * 1e3;
       this.autoSyncIntervalId = window.setInterval(() => {
         if (!(import_obsidian7.Platform.isMobile && this.settings.mobileManualSync) && !this.settings.syncPaused) void this.runSync();
       }, intervalMs);
-      console.log(`Auto sync scheduled every ${this.settings.syncIntervalMinutes} minutes.`);
+      console.log(`Auto sync scheduled every ${intervalSec} seconds.`);
     }
   }
 };
