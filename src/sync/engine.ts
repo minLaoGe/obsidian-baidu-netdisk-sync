@@ -275,9 +275,11 @@ export class SyncEngine {
         result.total = allPaths.size;
 
         // Plan from one baseline while holding the existing vault-wide mutex.
-        // Only independent uploads may overlap. Downloads/deletions/conflicts run
-        // after all uploads settle, preserving the existing atomic-write lock.
+        // Plan from one baseline while holding the existing vault-wide mutex.
+        // Independent uploads and downloads run in controlled concurrency pools.
+        // Deletions/conflicts run after file transfers settle, preserving atomic-write isolation.
         const uploads: Array<() => Promise<void>> = [];
+        const downloads: Array<() => Promise<void>> = [];
         const serial: Array<() => Promise<void>> = [];
         const mutationPaths:string[]=[];
         let completed = 0;
@@ -285,7 +287,8 @@ export class SyncEngine {
         let acceptedIdentical = false;
         for (const path of allPaths) {
           if(this.interactiveConflictRequests) break;
-          this.setStatus(`检查本地变更 (${uploads.length + serial.length + completed + 1}/${allPaths.size})`, true);
+          const totalPlanned = uploads.length + downloads.length + serial.length;
+          this.setStatus(`检查本地变更 (${totalPlanned + completed + 1}/${allPaths.size})`, true);
           try {
             if (this.shouldIgnore(path)) { completed++; result.skipped++; continue; }
             const remotePath = toRemotePath(settings.remoteBasePath, path);
@@ -305,8 +308,10 @@ export class SyncEngine {
             const work = async () => {
               if (this.getSettings().syncPaused || this.interactiveConflictRequests) return;
               const itemStarted = Date.now();
-              this.currentFiles.add(path); this.setStatus(`同步变更 (${completedWork}/${uploads.length+serial.length})`, true);
+              const plannedCount = uploads.length + downloads.length + serial.length;
+              this.currentFiles.add(path); this.setStatus(`同步变更 (${completedWork}/${plannedCount})`, true);
               const wasUpload = decision.action === "upload";
+              const wasDownload = decision.action === "download";
               try {
                 // Local content may change while the plan is being scanned or
                 // waiting for a worker. Recheck before any overwrite/deletion.
@@ -323,6 +328,14 @@ export class SyncEngine {
                 if (wasUpload && decision.action !== "upload") {
                   this.log("warn", `文件在排队期间发生变化，留待下次同步: ${path}`);
                   return;
+                }
+                if (wasDownload && decision.action !== "download") {
+                  if (decision.action === "conflict") {
+                    this.log("warn", `本地文件在排队期间被编辑，触发冲突安全保护: ${path}`);
+                  } else {
+                    this.log("warn", `本地文件在排队期间状态变化，中止下载覆盖: ${path}`);
+                    return;
+                  }
                 }
                 if (decision.action !== "noop") {
                   await this.executeAction(path, remotePath, decision, localInspection, remoteInspection, base);
@@ -349,17 +362,27 @@ export class SyncEngine {
               } finally {
                 completed++;
                 completedWork++; this.currentFiles.delete(path);
-                this.setStatus(`同步变更 (${completedWork}/${uploads.length+serial.length})`, true);
+                const plannedCount = uploads.length + downloads.length + serial.length;
+                this.setStatus(`同步变更 (${completedWork}/${plannedCount})`, true);
               }
               // Checkpoint only completed commits. Save stays serialized and
               // atomic; a checkpoint failure stops new work and drains workers.
               await this.stateStore.save();
               if (decision.action === "upload") {
                 this.log("info", `上传耗时: ${path} ${(Date.now() - itemStarted) / 1000}s`);
+              } else if (decision.action === "download") {
+                this.log("info", `下载耗时: ${path} ${(Date.now() - itemStarted) / 1000}s`);
               }
             };
-            (decision.action === "upload" ? uploads : serial).push(work);
-            if(decision.action==="upload" || decision.action==="delete_remote") mutationPaths.push(path);
+            if (decision.action === "upload") {
+              uploads.push(work);
+              mutationPaths.push(path);
+            } else if (decision.action === "download") {
+              downloads.push(work);
+            } else {
+              serial.push(work);
+              if (decision.action === "delete_remote") mutationPaths.push(path);
+            }
           } catch (itemErr: any) {
             completed++;
             this.log("error", `同步失败: ${path}`, itemErr.message || String(itemErr));
@@ -368,10 +391,12 @@ export class SyncEngine {
         }
         if (acceptedIdentical) await this.stateStore.save();
         const concurrency = Math.max(1, Math.min(3, Math.floor(settings.uploadConcurrency || 3)));
-        this.log("info", `上传计划: ${uploads.length} 个文件，并发 ${concurrency}`);
+        if (uploads.length) this.log("info", `上传计划: ${uploads.length} 个文件，并发 ${concurrency}`);
+        if (downloads.length) this.log("info", `下载计划: ${downloads.length} 个文件，并发 ${concurrency}`);
         if (uploads.length) await this.client.createDirectory(settings.remoteBasePath);
         const executePlan=async()=>{
-          await runBounded(uploads, concurrency, work => work());
+          if (uploads.length) await runBounded(uploads, concurrency, work => work());
+          if (downloads.length) await runBounded(downloads, concurrency, work => work());
           for (const work of serial) await work();
         };
         if(settings.incrementalSync && mutationPaths.length) {

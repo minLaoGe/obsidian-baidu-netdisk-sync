@@ -62,5 +62,34 @@ const delay=ms=>new Promise(r=>setTimeout(r,ms));
   release();await full;const result=await batch;
   assert.equal(started,1);assert.equal(committed,true);assert.deepEqual(result.resolved,['conflict.md']);assert.equal(engine.interactiveConflictRequests,0);
  }
- console.log('PASS: bounded uploads, drain on failure, serialized checkpoints, failed baselines, deletion barriers, full/single sync isolation');
+  {
+   let dlActive=0, dlPeak=0, dlDone=[], delExecuted=false;
+   const remoteFiles = [
+     {path:'/test/d1.md',fsId:'1',md5:'m1',serverMtime:1,isdir:0},
+     {path:'/test/d2.md',fsId:'2',md5:'m2',serverMtime:1,isdir:0},
+     {path:'/test/d3.md',fsId:'3',md5:'m3',serverMtime:1,isdir:0},
+     {path:'/test/delete.md',fsId:'4',md5:'m4',serverMtime:1,isdir:0}
+   ];
+   const app={vault:{configDir:'.custom',adapter:{},getFiles:()=>[]}};
+   const engine=new SyncEngine(app,()=>({accessToken:'test',remoteBasePath:'/test',uploadConcurrency:3,ignoredPatterns:[]}),{createDirectory:async()=>{},listFiles:async()=>remoteFiles});
+   engine.log=()=>{};
+   engine.stateStore={getAll:()=>({'delete.md':{localMd5:'local',remoteMd5:'m4'}}),save:async()=>{},setLastFullSyncTimestamp:()=>{}};
+   engine.inspectLocalFile=async path=>({exists:false});
+   engine.executeAction=async(path,remote,decision)=>{
+     if (decision.action === 'download') {
+       assert.equal(delExecuted, false, 'Deletion must not run before downloads finish');
+       dlActive++; dlPeak = Math.max(dlPeak, dlActive);
+       await delay(10);
+       dlActive--; dlDone.push(path);
+     } else if (decision.action === 'conflict') {
+       assert.equal(dlActive, 0, 'Destructive conflict/delete must run with 0 active downloads');
+       delExecuted = true;
+     }
+   };
+   const result = await engine.runFullSync();
+   assert.equal(dlPeak, 3, 'Peak concurrent downloads should reach concurrency limit 3');
+   assert.equal(dlDone.length, 3);
+   assert.equal(delExecuted, true);
+  }
+  console.log('PASS: bounded uploads & downloads, drain on failure, serialized checkpoints, failed baselines, deletion barriers, full/single sync isolation');
 })().catch(e=>{console.error(e);process.exitCode=1});

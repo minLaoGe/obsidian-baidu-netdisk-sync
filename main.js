@@ -2387,6 +2387,7 @@ var SyncEngine = class {
         ]);
         result.total = allPaths.size;
         const uploads = [];
+        const downloads = [];
         const serial = [];
         const mutationPaths = [];
         let completed = 0;
@@ -2394,7 +2395,8 @@ var SyncEngine = class {
         let acceptedIdentical = false;
         for (const path of allPaths) {
           if (this.interactiveConflictRequests) break;
-          this.setStatus(`\u68C0\u67E5\u672C\u5730\u53D8\u66F4 (${uploads.length + serial.length + completed + 1}/${allPaths.size})`, true);
+          const totalPlanned = uploads.length + downloads.length + serial.length;
+          this.setStatus(`\u68C0\u67E5\u672C\u5730\u53D8\u66F4 (${totalPlanned + completed + 1}/${allPaths.size})`, true);
           try {
             if (this.shouldIgnore(path)) {
               completed++;
@@ -2423,9 +2425,11 @@ var SyncEngine = class {
             const work = async () => {
               if (this.getSettings().syncPaused || this.interactiveConflictRequests) return;
               const itemStarted = Date.now();
+              const plannedCount = uploads.length + downloads.length + serial.length;
               this.currentFiles.add(path);
-              this.setStatus(`\u540C\u6B65\u53D8\u66F4 (${completedWork}/${uploads.length + serial.length})`, true);
+              this.setStatus(`\u540C\u6B65\u53D8\u66F4 (${completedWork}/${plannedCount})`, true);
               const wasUpload = decision.action === "upload";
+              const wasDownload = decision.action === "download";
               try {
                 localInspection = await this.inspectLocalFile(path);
                 if (indexed?.incremental) {
@@ -2439,6 +2443,14 @@ var SyncEngine = class {
                 if (wasUpload && decision.action !== "upload") {
                   this.log("warn", `\u6587\u4EF6\u5728\u6392\u961F\u671F\u95F4\u53D1\u751F\u53D8\u5316\uFF0C\u7559\u5F85\u4E0B\u6B21\u540C\u6B65: ${path}`);
                   return;
+                }
+                if (wasDownload && decision.action !== "download") {
+                  if (decision.action === "conflict") {
+                    this.log("warn", `\u672C\u5730\u6587\u4EF6\u5728\u6392\u961F\u671F\u95F4\u88AB\u7F16\u8F91\uFF0C\u89E6\u53D1\u51B2\u7A81\u5B89\u5168\u4FDD\u62A4: ${path}`);
+                  } else {
+                    this.log("warn", `\u672C\u5730\u6587\u4EF6\u5728\u6392\u961F\u671F\u95F4\u72B6\u6001\u53D8\u5316\uFF0C\u4E2D\u6B62\u4E0B\u8F7D\u8986\u76D6: ${path}`);
+                    return;
+                  }
                 }
                 if (decision.action !== "noop") {
                   await this.executeAction(path, remotePath, decision, localInspection, remoteInspection, base);
@@ -2466,15 +2478,25 @@ var SyncEngine = class {
                 completed++;
                 completedWork++;
                 this.currentFiles.delete(path);
-                this.setStatus(`\u540C\u6B65\u53D8\u66F4 (${completedWork}/${uploads.length + serial.length})`, true);
+                const plannedCount2 = uploads.length + downloads.length + serial.length;
+                this.setStatus(`\u540C\u6B65\u53D8\u66F4 (${completedWork}/${plannedCount2})`, true);
               }
               await this.stateStore.save();
               if (decision.action === "upload") {
                 this.log("info", `\u4E0A\u4F20\u8017\u65F6: ${path} ${(Date.now() - itemStarted) / 1e3}s`);
+              } else if (decision.action === "download") {
+                this.log("info", `\u4E0B\u8F7D\u8017\u65F6: ${path} ${(Date.now() - itemStarted) / 1e3}s`);
               }
             };
-            (decision.action === "upload" ? uploads : serial).push(work);
-            if (decision.action === "upload" || decision.action === "delete_remote") mutationPaths.push(path);
+            if (decision.action === "upload") {
+              uploads.push(work);
+              mutationPaths.push(path);
+            } else if (decision.action === "download") {
+              downloads.push(work);
+            } else {
+              serial.push(work);
+              if (decision.action === "delete_remote") mutationPaths.push(path);
+            }
           } catch (itemErr) {
             completed++;
             this.log("error", `\u540C\u6B65\u5931\u8D25: ${path}`, itemErr.message || String(itemErr));
@@ -2483,10 +2505,12 @@ var SyncEngine = class {
         }
         if (acceptedIdentical) await this.stateStore.save();
         const concurrency = Math.max(1, Math.min(3, Math.floor(settings.uploadConcurrency || 3)));
-        this.log("info", `\u4E0A\u4F20\u8BA1\u5212: ${uploads.length} \u4E2A\u6587\u4EF6\uFF0C\u5E76\u53D1 ${concurrency}`);
+        if (uploads.length) this.log("info", `\u4E0A\u4F20\u8BA1\u5212: ${uploads.length} \u4E2A\u6587\u4EF6\uFF0C\u5E76\u53D1 ${concurrency}`);
+        if (downloads.length) this.log("info", `\u4E0B\u8F7D\u8BA1\u5212: ${downloads.length} \u4E2A\u6587\u4EF6\uFF0C\u5E76\u53D1 ${concurrency}`);
         if (uploads.length) await this.client.createDirectory(settings.remoteBasePath);
         const executePlan = async () => {
-          await runBounded(uploads, concurrency, (work) => work());
+          if (uploads.length) await runBounded(uploads, concurrency, (work) => work());
+          if (downloads.length) await runBounded(downloads, concurrency, (work) => work());
           for (const work of serial) await work();
         };
         if (settings.incrementalSync && mutationPaths.length) {
