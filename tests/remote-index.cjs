@@ -1,4 +1,5 @@
 const assert=require('node:assert/strict'),esbuild=require('esbuild');
+if (!globalThis.crypto) globalThis.crypto = require('node:crypto').webcrypto;
 const mock={Platform:{isDesktopApp:false},FileSystemAdapter:class{},Notice:class{},TFile:class{}};
 function load(file){const b=esbuild.buildSync({entryPoints:[file],bundle:true,platform:'node',format:'cjs',write:false,external:['obsidian']});const m={exports:{}};new Function('require','module','exports',b.outputFiles[0].text)(id=>id==='obsidian'?mock:require(id),m,m.exports);return m.exports;}
 const {RemoteIndex,INDEX_DIR}=load('src/sync/remote-index.ts');

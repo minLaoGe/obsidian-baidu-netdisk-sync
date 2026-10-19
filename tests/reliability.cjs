@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const esbuild = require('esbuild');
 const nodeCrypto = require('node:crypto');
+if (!globalThis.crypto) globalThis.crypto = nodeCrypto.webcrypto;
 const mockObsidian = { Platform: { isDesktopApp: false }, FileSystemAdapter: class {}, Notice: class {}, TFile: class {} };
 function load(file) {
   const result = esbuild.buildSync({ entryPoints: [file], bundle: true, platform: 'node', format: 'cjs', write: false, external: ['obsidian'] });

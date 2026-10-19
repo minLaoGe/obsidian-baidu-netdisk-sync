@@ -129,7 +129,17 @@ ${counts}`);
       content.createEl("h4", { text: "\u5F53\u524D\u6587\u4EF6" });
       for (const file of state.files) content.createDiv({ text: file, cls: "baidu-sync-progress-file" });
     }
-    if (state.busy) content.createEl("p", { text: "\u540C\u6B65\u65F6\u8BF7\u4FDD\u6301 Obsidian \u5728\u524D\u53F0\u3002\u8FDB\u5EA6\u6309\u672C\u9636\u6BB5\u6587\u4EF6\u6570\u91CF\u8BA1\u7B97\uFF0C\u4E0D\u4EE3\u8868\u5B57\u8282\u4E0B\u8F7D\u901F\u5EA6\u3002", cls: "setting-item-description" });
+    if (state.busy) {
+      content.createEl("p", {
+        text: "\u26A0\uFE0F \u63D0\u793A\uFF1A\u540C\u6B65\u671F\u95F4\u8BF7\u4FDD\u6301\u624B\u673A\u5728\u524D\u53F0\u4EAE\u5C4F\uFF0C\u5207\u52FF\u606F\u5C4F\u6216\u5207\u6362\u540E\u53F0\uFF08Android \u4F11\u7720\u4F1A\u5207\u65AD\u7F51\u7EDC\u5BFC\u81F4 UnknownHostException \u9519\u8BEF\uFF09\u3002",
+        cls: "setting-item-description"
+      });
+    } else {
+      content.createEl("p", {
+        text: "\u{1F4A1} \u63D0\u793A\uFF1A\u82E5\u540C\u6B65\u63D0\u793A\u7F51\u7EDC\u9519\u8BEF\u6216\u57DF\u540D\u89E3\u6790\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u624B\u673A\u7F51\u7EDC\u8FDE\u63A5\u3001\u5173\u95ED\u79D1\u5B66\u4E0A\u7F51\u4EE3\u7406\u6216\u7CFB\u7EDF\u201C\u4E13\u7528 DNS\u201D\u540E\u4FDD\u6301\u4EAE\u5C4F\u91CD\u8BD5\u3002",
+        cls: "setting-item-description"
+      });
+    }
     const actions = content.createDiv({ cls: "baidu-sync-progress-actions" });
     const hide = actions.createEl("button", { text: state.busy ? "\u6536\u8D77\uFF0C\u7EE7\u7EED\u540C\u6B65" : "\u5173\u95ED" });
     hide.onclick = () => this.modal?.close();
@@ -1046,12 +1056,12 @@ var BaiduSyncSettingTab = class extends import_obsidian3.PluginSettingTab {
     containerEl.empty();
     new import_obsidian3.Setting(containerEl).setName("\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u8BBE\u7F6E (Baidu Netdisk Sync)").setHeading();
     if (import_obsidian3.Platform.isMobile) {
-      new import_obsidian3.Setting(containerEl).setName("\u624B\u673A\u624B\u52A8\u540C\u6B65\u6A21\u5F0F").setDesc("\u5F00\u542F\u65F6\u4EC5\u70B9\u51FB\u7ACB\u5373\u540C\u6B65\u624D\u4F20\u8F93\u6587\u4EF6\uFF0C\u5173\u95ED\u542F\u52A8\u3001\u5B9A\u65F6\u548C\u6587\u4EF6\u53D8\u52A8\u89E6\u53D1\u3002\u540C\u6B65\u65F6\u8BF7\u4FDD\u6301 Obsidian \u5728\u524D\u53F0\u3002").addToggle((toggle) => toggle.setValue(this.plugin.settings.mobileManualSync).onChange(async (value) => {
+      new import_obsidian3.Setting(containerEl).setName("\u624B\u673A\u624B\u52A8\u540C\u6B65\u6A21\u5F0F").setDesc("\u5F00\u542F\u65F6\u4EC5\u70B9\u51FB\u7ACB\u5373\u540C\u6B65\u624D\u4F20\u8F93\u6587\u4EF6\uFF0C\u5173\u95ED\u542F\u52A8\u3001\u5B9A\u65F6\u548C\u6587\u4EF6\u53D8\u52A8\u89E6\u53D1\u3002\u540C\u6B65\u65F6\u8BF7\u4FDD\u6301 Obsidian \u4EAE\u5C4F\u5728\u524D\u53F0\uFF0C\u5207\u52FF\u9501\u5C4F\u6216\u5207\u5230\u540E\u53F0\u3002").addToggle((toggle) => toggle.setValue(this.plugin.settings.mobileManualSync).onChange(async (value) => {
         this.plugin.settings.mobileManualSync = value;
         await this.plugin.saveSettings();
         this.plugin.resetAutoSyncTimer();
       }));
-      new import_obsidian3.Setting(containerEl).setName("\u624B\u673A\u540C\u6B65").addButton((button) => button.setButtonText("\u7ACB\u5373\u540C\u6B65").setCta().onClick(async () => {
+      new import_obsidian3.Setting(containerEl).setName("\u624B\u673A\u540C\u6B65").setDesc("\u63D0\u793A\uFF1A\u9996\u6B21\u6216\u5168\u91CF\u540C\u6B65\u8017\u65F6\u8F83\u957F\uFF0C\u8BF7\u4FDD\u6301\u624B\u673A\u4EAE\u5C4F\u505C\u7559\u5728\u5F53\u524D\u9875\u9762\u3002\u82E5\u63D0\u793A UnknownHostException \u8BF7\u68C0\u67E5\u7F51\u7EDC\u6216\u5173\u95ED\u4EE3\u7406/\u4E13\u7528DNS\u3002").addButton((button) => button.setButtonText("\u7ACB\u5373\u540C\u6B65").setCta().onClick(async () => {
         await this.plugin.runSync();
       })).addButton((button) => button.setButtonText("\u67E5\u770B\u8FDB\u5EA6").onClick(() => this.plugin.openSyncProgress())).addButton((button) => button.setButtonText("\u67E5\u770B\u51B2\u7A81").onClick(() => this.plugin.openConflictReview()));
     }
@@ -2503,8 +2513,11 @@ var SyncEngine = class {
           this.setStatus("\u6B63\u5728\u5904\u7406\u6240\u9009\u51B2\u7A81", true);
           return result;
         }
-        this.log("error", "\u5168\u91CF\u540C\u6B65\u8FC7\u7A0B\u5F02\u5E38\u9000\u51FA", err.message || String(err));
-        new import_obsidian5.Notice(`\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u9519\u8BEF: ${err.message || String(err)}`);
+        const rawErr = err.message || String(err);
+        const isNetworkOrDns = /UnknownHostException|Unable to resolve host|NetworkError|Failed to fetch|timed? ?out/i.test(rawErr);
+        const friendlyDetail = isNetworkOrDns ? `\u7F51\u7EDC\u4E2D\u65AD\u6216\u57DF\u540D\u89E3\u6790\u5931\u8D25\uFF08\u624B\u673A\u4F11\u7720\u606F\u5C4F\u3001\u4EE3\u7406\u5206\u6D41\u6216\u7F51\u7EDC\u4E2D\u65AD\uFF09\uFF1A${rawErr}` : rawErr;
+        this.log("error", "\u5168\u91CF\u540C\u6B65\u8FC7\u7A0B\u5F02\u5E38\u9000\u51FA", friendlyDetail);
+        new import_obsidian5.Notice(`\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u9519\u8BEF: ${friendlyDetail}`, 1e4);
         this.setStatus("\u540C\u6B65\u51FA\u9519", false);
       } finally {
         this.isSyncing = false;

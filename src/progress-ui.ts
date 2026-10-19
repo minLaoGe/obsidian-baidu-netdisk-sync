@@ -67,7 +67,17 @@ export class MobileSyncProgress extends Component {
       content.createEl('h4',{text:'当前文件'});
       for (const file of state.files) content.createDiv({text:file,cls:'baidu-sync-progress-file'});
     }
-    if (state.busy) content.createEl('p',{text:'同步时请保持 Obsidian 在前台。进度按本阶段文件数量计算，不代表字节下载速度。',cls:'setting-item-description'});
+    if (state.busy) {
+      content.createEl('p', {
+        text: '⚠️ 提示：同步期间请保持手机在前台亮屏，切勿息屏或切换后台（Android 休眠会切断网络导致 UnknownHostException 错误）。',
+        cls: 'setting-item-description'
+      });
+    } else {
+      content.createEl('p', {
+        text: '💡 提示：若同步提示网络错误或域名解析失败，请检查手机网络连接、关闭科学上网代理或系统“专用 DNS”后保持亮屏重试。',
+        cls: 'setting-item-description'
+      });
+    }
     const actions = content.createDiv({cls:'baidu-sync-progress-actions'});
     const hide = actions.createEl('button',{text:state.busy?'收起，继续同步':'关闭'}); hide.onclick=()=>this.modal?.close();
     const conflict = actions.createEl('button',{text:'查看冲突'}); conflict.onclick=()=>{this.modal?.close();this.plugin.openConflictReview();};

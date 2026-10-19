@@ -46,12 +46,13 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
 
     if (Platform.isMobile) {
       new Setting(containerEl).setName("手机手动同步模式")
-        .setDesc("开启时仅点击立即同步才传输文件，关闭启动、定时和文件变动触发。同步时请保持 Obsidian 在前台。")
+        .setDesc("开启时仅点击立即同步才传输文件，关闭启动、定时和文件变动触发。同步时请保持 Obsidian 亮屏在前台，切勿锁屏或切到后台。")
         .addToggle(toggle => toggle.setValue(this.plugin.settings.mobileManualSync).onChange(async value => {
           this.plugin.settings.mobileManualSync = value;
           await this.plugin.saveSettings(); this.plugin.resetAutoSyncTimer();
         }));
       new Setting(containerEl).setName("手机同步")
+        .setDesc("提示：首次或全量同步耗时较长，请保持手机亮屏停留在当前页面。若提示 UnknownHostException 请检查网络或关闭代理/专用DNS。")
         .addButton(button => button.setButtonText("立即同步").setCta().onClick(async () => { await this.plugin.runSync(); }))
         .addButton(button => button.setButtonText("查看进度").onClick(() => this.plugin.openSyncProgress()))
         .addButton(button => button.setButtonText("查看冲突").onClick(() => this.plugin.openConflictReview()));

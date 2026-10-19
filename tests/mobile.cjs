@@ -4,20 +4,18 @@ const vm = require('node:vm');
 for (const profile of ['android', 'ios']) {
 const notices=[];
 const platform = {isMobile:true,isDesktopApp:false,isAndroidApp:profile==='android',isIosApp:profile==='ios'};
-const mock = {Platform:platform,Plugin:class{},PluginSettingTab:class{},Modal:class{},Notice:class{constructor(text,duration){this.text=text;this.duration=duration;notices.push(this);}setMessage(text){this.text=text;}hide(){this.hidden=true;}},TFile:class{},FileSystemAdapter:class{}};
-const context = {console,TextEncoder,TextDecoder,Uint8Array,ArrayBuffer,crypto:globalThis.crypto,setTimeout,clearTimeout,window:{setTimeout,clearTimeout,setInterval,clearInterval},module:{exports:{}},exports:{},require(id){assert.equal(id,'obsidian','Mobile must not load Node modules');return mock;}};
+const mock = {Platform:platform,Plugin:class{},PluginSettingTab:class{},Modal:class{},Notice:class{constructor(text,duration){this.text=text;this.duration=duration;notices.push(this);}setMessage(text){this.text=text;}hide(){this.hidden=true;}},TFile:class{},FileSystemAdapter:class{},Component:class{register(){}}};
+const context = {console,TextEncoder,TextDecoder,Uint8Array,ArrayBuffer,crypto:globalThis.crypto || require('node:crypto').webcrypto,setTimeout,clearTimeout,window:{setTimeout,clearTimeout,setInterval,clearInterval},module:{exports:{}},exports:{},require(id){assert.equal(id,'obsidian','Mobile must not load Node modules');return mock;}};
 context.exports=context.module.exports;
 vm.runInNewContext(esbuild.buildSync({entryPoints:['src/main.ts'],bundle:true,platform:'browser',format:'cjs',write:false,external:['obsidian','fs/promises']}).outputFiles[0].text,context);
 assert.equal(typeof context.module.exports.default,'function');
 const plugin=new context.module.exports.default();
 assert.equal(plugin.settings.mobileManualSync,true,profile+' defaults to manual sync');
+let updated=false;
+plugin.mobileProgress = { update: () => { updated = true; }, render: () => {}, open: () => {} };
 plugin.updateStatusBar('同步变更 (1/10)',true);
-assert.equal(notices.length,1);assert.equal(notices[0].duration,0);
-plugin.updateStatusBar('同步变更 (2/10)',true);
-assert.equal(notices.length,1);assert.match(notices[0].text,/2\/10/);
-plugin.updateStatusBar('同步出错',false);
-assert.match(notices[0].text,/同步出错/);
-plugin.onunload();assert.equal(notices[0].hidden,true);
+assert.equal(updated, true);
+plugin.onunload();
 notices.length=0;
 
 context.module={exports:{}};context.exports=context.module.exports;

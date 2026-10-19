@@ -399,8 +399,13 @@ export class SyncEngine {
           this.setStatus("正在处理所选冲突",true);
           return result;
         }
-        this.log("error", "全量同步过程异常退出", err.message || String(err));
-        new Notice(`百度网盘同步错误: ${err.message || String(err)}`);
+        const rawErr = err.message || String(err);
+        const isNetworkOrDns = /UnknownHostException|Unable to resolve host|NetworkError|Failed to fetch|timed? ?out/i.test(rawErr);
+        const friendlyDetail = isNetworkOrDns
+          ? `网络中断或域名解析失败（手机休眠息屏、代理分流或网络中断）：${rawErr}`
+          : rawErr;
+        this.log("error", "全量同步过程异常退出", friendlyDetail);
+        new Notice(`百度网盘同步错误: ${friendlyDetail}`, 10000);
         this.setStatus("同步出错", false);
       } finally {
         this.isSyncing = false; this.progressFinishedAt = Date.now(); this.currentFiles.clear();
