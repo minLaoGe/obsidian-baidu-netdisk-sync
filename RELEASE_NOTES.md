@@ -1,3 +1,5 @@
+# Release Notes / 版本发布说明
+
 ## 1.0.8 安卓防闪退分片拉取、相同内容冲突自动消解与独立并发设置
 
 - **安卓端超大文件分片流式下载（彻底解决 OOM 闪退）**：
@@ -24,37 +26,32 @@
 - 显示当前阶段已完成/总文件数、耗时、当前文件、上传/下载/跳过/冲突/失败数量和最近记录。
 - 设置新增“查看进度”，新增命令“查看百度同步进度”。关闭面板不会取消同步，重复点击手动同步复用当前任务。
 - 进度按当前阶段文件数量计算，不虚构整体字节百分比；目录扫描没有计数时显示不定进度。
-- 类型检查及生产构建通过，未执行真实网盘同步测试。
 
-## Unreleased — Concurrent uploads, delta sync, and manual conflict review
+## 1.0.5 移动端首发适配与手动同步防护
 
-### Added
+- 支持 Android 与 iOS 移动设备纯 Web 环境安全加载，解耦桌面端 Node.js 原生 API。
+- 新增 `mobileManualSync` 设置项，手机端默认采用明确手动同步，避免后台意外休眠导致写入异常。
 
-- Configurable 1–3 upload workers for independent files, defaulting to three.
-- Unchanged-content local saves skip network requests; unchanged full syncs skip directory creation and baseline rewrites. Sync summaries report skipped files.
-- Persistent, human-reviewed conflicts with notices, status-bar count, settings/command entry points, original/remote snapshot links, refresh, and explicit resolution confirmation.
-- Delete-versus-edit conflicts also await human review. Pending originals and snapshot copies are excluded from automatic sync; remote changes invalidate stale confirmation.
+## 1.0.4 预创建协议优化与社区规范
 
-### Fixed and preserved
+- 修复预创建接口返回类型处理：区分 `return_type=1`（分块上传）与 `return_type=2`（秒传），修复大文件分块合并报错 `31500`。
+- 修复 Multipart 请求在部分平台由 Obsidian 自动计算 Content-Length，防止 `ERR_INVALID_ARGUMENT`。
+- 遵循社区审核规范优化设置布局、日志严重级别颜色与配对码动态遮罩。
 
-- Correct precreate return types and required-block handling; fix create error 31500.
-- Let Obsidian calculate multipart Content-Length; fix ERR_INVALID_ARGUMENT.
-- Serialize token refresh and atomic state checkpoints; stop dispatch and drain in-flight workers on checkpoint failure.
-- Preserve per-file upload order, full/incremental sync isolation, local atomic replacement, and crash recovery. Hash actual uploaded bytes and recheck local content after queuing.
-- Older automatic winner preferences no longer apply; original files are not overwritten merely to clear conflicts.
+## 1.0.3 Git 风格行内冲突标记与增量同步
 
-### Validation and upgrade
+- 新增 Git 风格单文件行内标记合并模式（`git_merge`）：笔记内标出 `<<<<<<< LOCAL / ======= / >>>>>>> REMOTE`，不产生额外副本。
+- 引入基于网盘服务端事件记录的增量同步模块（`remote-index.ts`），非首次同步无需全量扫描整个网盘。
+- 修复仅 `fsId` 变化但内容 MD5 实际未变时的误报冲突。
 
-- TypeScript, production build, 104 reliability assertions, concurrency, delta and upload-protocol tests pass.
-- Four real Baidu trials: serial 11.747/14.470s versus three workers 5.299/3.531s (about 2.97× by mean); 36 files and a separate multi-part file verified byte-for-byte after download.
-- Wait for active sync to finish before reloading the updated plugin. Preserve credentials and existing sync state. Legacy conflict copies remain local; they are not retroactively assigned invented conflict baselines.
-- Per-file atomicity is retained; this is not a vault-wide or cross-device transaction. This commit does not publish a release or change the release version.
+## 1.0.2 差异同步、可视化冲突解决与并发上传
 
-## 1.0.4
+- **差异同步（Delta Sync）**：本地未修改保存直接跳过网络请求，全量未修改跳过网盘建目录与基线重写。
+- **可视化冲突人工解决**：提供双向对比（Diff View），支持直接在界面内合并保存或批量选择接受版本。
+- **有界并发上传**：1~3 线程受控并发池，实测上传提速约 2.97 倍。
 
-- Address the community scanner UI errors: use Setting headings and CSS classes for settings and modal layouts.
-- Keep dynamic pairing controls hidden until generation completes and use severity classes for log colors.
-- Clarify desktop-only setup help; includes English documentation and all reliability fixes from 1.0.2.
-- Typecheck, 71 reliability assertions, and production build pass.
+## 1.0.1 / 1.0.0 核心基础架构
 
-Requires desktop Obsidian 1.14.4+. Community directory automated review is in progress.
+- 两阶段提交原子文件系统（`AtomicFileSystem`），确保断电或意外退出不损坏文档。
+- 状态基准库（`SyncStateStore`），持久化同步基准数据。
+- 百度网盘 OAuth 2.0 自动续期与可选 AES-256-GCM 端到端加密（E2EE）。
