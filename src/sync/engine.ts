@@ -492,7 +492,7 @@ export class SyncEngine {
           throw new Error(`缺少 fs_id 无法下载: ${remotePath}`);
         }
 
-        let data = await this.client.downloadFile(remote.fsId);
+        let data = await this.client.downloadFile(remote.fsId, remote.size);
 
         // End-to-End Decryption
         if (isEncrypted(data) || settings.enableE2EE) {
@@ -635,7 +635,7 @@ export class SyncEngine {
     let copyPath: string | undefined;
     if (remote.exists) {
       if (!remote.fsId) throw new Error("冲突缺少远端文件标识");
-      data = await this.client.downloadFile(remote.fsId);
+      data = await this.client.downloadFile(remote.fsId, remote.size);
       const settings = this.getSettings();
       if (isEncrypted(data) || settings.enableE2EE) {
         if (!settings.e2eePassword) throw new Error("无法解密远端冲突副本");
@@ -749,7 +749,7 @@ export class SyncEngine {
       if (copy && (await this.app.vault.adapter.exists(copy))) {
         remote = await read(copy);
       } else if (record.remote.fsId) {
-        let raw = await this.client.downloadFile(record.remote.fsId);
+        let raw = await this.client.downloadFile(record.remote.fsId, record.remote.size);
         if (isEncrypted(raw) || this.getSettings().enableE2EE) {
           const pwd = this.getSettings().e2eePassword;
           if (pwd) {

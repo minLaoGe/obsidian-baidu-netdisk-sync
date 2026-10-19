@@ -81,7 +81,7 @@ export class RemoteIndex {
       this.checkYield();
       const previous=cache?.events[name];
       if(previous && previous.fingerprint===fingerprint(file)) {events[name]=previous;continue;}
-      const data=await this.client.downloadFile(file.fsId);
+      const data=await this.client.downloadFile(file.fsId, file.size);
       if(data.byteLength>65536) throw new Error("变更记录过大");
       const event=validateEvent(JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(data)),name);
       events[name]={fingerprint:fingerprint(file),event};

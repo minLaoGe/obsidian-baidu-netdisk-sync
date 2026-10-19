@@ -627,20 +627,83 @@ var BaiduClient = class {
     return data.list[0].dlink;
   }
   /**
-   * Download file content as ArrayBuffer with proper User-Agent
+   * Download file content as ArrayBuffer with proper User-Agent.
+   * On mobile (and for large files), requests are safely chunked using HTTP Range
+   * to avoid Capacitor's bridge Base64 OutOfMemoryError in Android ART.
    */
-  async downloadFile(fsId) {
+  async downloadFile(fsId, expectedSize, onProgress) {
     const token = await this.ensureFreshToken();
     const dlink = await this.getDownloadLink(fsId);
     const downloadUrl = dlink.includes("?") ? `${dlink}&access_token=${token}` : `${dlink}?access_token=${token}`;
-    const res = await (0, import_obsidian2.requestUrl)({
+    const CHUNK_SIZE = 4 * 1024 * 1024;
+    if (expectedSize !== void 0 && expectedSize <= CHUNK_SIZE) {
+      const res = await (0, import_obsidian2.requestUrl)({
+        url: downloadUrl,
+        method: "GET",
+        headers: {
+          "User-Agent": "pan.baidu.com"
+        }
+      });
+      return res.arrayBuffer;
+    }
+    const firstEnd = expectedSize !== void 0 ? Math.min(CHUNK_SIZE - 1, expectedSize - 1) : CHUNK_SIZE - 1;
+    const firstRes = await (0, import_obsidian2.requestUrl)({
       url: downloadUrl,
       method: "GET",
       headers: {
-        "User-Agent": "pan.baidu.com"
+        "User-Agent": "pan.baidu.com",
+        "Range": `bytes=0-${firstEnd}`
       }
     });
-    return res.arrayBuffer;
+    if (firstRes.status === 200) {
+      return firstRes.arrayBuffer;
+    }
+    if (firstRes.status !== 206) {
+      throw new Error(`Failed to download file chunk (HTTP ${firstRes.status})`);
+    }
+    let totalSize = expectedSize;
+    const contentRange = firstRes.headers?.["content-range"] || firstRes.headers?.["Content-Range"];
+    if (contentRange) {
+      const match = /\/(\d+)$/.exec(contentRange);
+      if (match) {
+        totalSize = parseInt(match[1], 10);
+      }
+    }
+    if (!totalSize || isNaN(totalSize)) {
+      const fallbackRes = await (0, import_obsidian2.requestUrl)({
+        url: downloadUrl,
+        method: "GET",
+        headers: { "User-Agent": "pan.baidu.com" }
+      });
+      return fallbackRes.arrayBuffer;
+    }
+    const firstBytes = new Uint8Array(firstRes.arrayBuffer);
+    if (firstBytes.byteLength === totalSize) {
+      return firstRes.arrayBuffer;
+    }
+    const result = new Uint8Array(totalSize);
+    result.set(firstBytes, 0);
+    let downloaded = firstBytes.byteLength;
+    onProgress?.(downloaded, totalSize);
+    while (downloaded < totalSize) {
+      const end = Math.min(downloaded + CHUNK_SIZE - 1, totalSize - 1);
+      const chunkRes = await (0, import_obsidian2.requestUrl)({
+        url: downloadUrl,
+        method: "GET",
+        headers: {
+          "User-Agent": "pan.baidu.com",
+          "Range": `bytes=${downloaded}-${end}`
+        }
+      });
+      if (chunkRes.status !== 206 && chunkRes.status !== 200) {
+        throw new Error(`Failed to download file chunk ${downloaded}-${end} (HTTP ${chunkRes.status})`);
+      }
+      const chunkBytes = new Uint8Array(chunkRes.arrayBuffer);
+      result.set(chunkBytes, downloaded);
+      downloaded += chunkBytes.byteLength;
+      onProgress?.(downloaded, totalSize);
+    }
+    return result.buffer;
   }
   /**
    * Ensure remote directory exists
@@ -1794,7 +1857,7 @@ var RemoteIndex = class {
         events[name] = previous;
         continue;
       }
-      const data = await this.client.downloadFile(file.fsId);
+      const data = await this.client.downloadFile(file.fsId, file.size);
       if (data.byteLength > 65536) throw new Error("\u53D8\u66F4\u8BB0\u5F55\u8FC7\u5927");
       const event = validateEvent(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(data)), name);
       events[name] = { fingerprint: fingerprint(file), event };
@@ -2588,7 +2651,7 @@ var SyncEngine = class {
         if (!remote.fsId) {
           throw new Error(`\u7F3A\u5C11 fs_id \u65E0\u6CD5\u4E0B\u8F7D: ${remotePath}`);
         }
-        let data = await this.client.downloadFile(remote.fsId);
+        let data = await this.client.downloadFile(remote.fsId, remote.size);
         if (isEncrypted(data) || settings.enableE2EE) {
           if (!settings.e2eePassword) {
             throw new Error(`\u6587\u4EF6 "${localPath}" \u5904\u4E8E\u52A0\u5BC6\u72B6\u6001\uFF0C\u4F46\u672C\u5730\u672A\u914D\u7F6E\u89E3\u5BC6\u5BC6\u7801\uFF01`);
@@ -2715,7 +2778,7 @@ var SyncEngine = class {
     let copyPath;
     if (remote.exists) {
       if (!remote.fsId) throw new Error("\u51B2\u7A81\u7F3A\u5C11\u8FDC\u7AEF\u6587\u4EF6\u6807\u8BC6");
-      data = await this.client.downloadFile(remote.fsId);
+      data = await this.client.downloadFile(remote.fsId, remote.size);
       const settings = this.getSettings();
       if (isEncrypted(data) || settings.enableE2EE) {
         if (!settings.e2eePassword) throw new Error("\u65E0\u6CD5\u89E3\u5BC6\u8FDC\u7AEF\u51B2\u7A81\u526F\u672C");
@@ -2831,7 +2894,7 @@ var SyncEngine = class {
       if (copy && await this.app.vault.adapter.exists(copy)) {
         remote = await read(copy);
       } else if (record.remote.fsId) {
-        let raw = await this.client.downloadFile(record.remote.fsId);
+        let raw = await this.client.downloadFile(record.remote.fsId, record.remote.size);
         if (isEncrypted(raw) || this.getSettings().enableE2EE) {
           const pwd = this.getSettings().e2eePassword;
           if (pwd) {
