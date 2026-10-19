@@ -3,7 +3,7 @@ import { hasConflictMarkers, mergeText } from "./merge";
 import { App, Notice, Platform, TAbstractFile, TFile } from "obsidian";
 import { BaiduClient } from "../api/baidu-client";
 import { decryptData, encryptData, isEncrypted } from "../crypto/e2ee";
-import { ConflictDecision, determineSyncAction, FileStateInspection, generateConflictPath, sameFileVersion } from "./conflict";
+import { ConflictDecision, determineSyncAction, FileStateInspection, generateConflictPath, sameFileContent, sameFileVersion } from "./conflict";
 import { DebounceManager, FifoQueue, Mutex, runBounded } from "./queue";
 import { SyncStateStore } from "./state";
 import { PendingConflict, ConflictStrategy, PluginSettings, RemoteFileInfo, SyncLogEntry, SyncResult } from "../types";
@@ -242,6 +242,9 @@ export class SyncEngine {
       this.log("info", "开始检查同步变更...");
 
       try {
+        // 0. Auto-resolve any pending conflicts whose content is already identical
+        await this.autoResolveIdenticalConflicts();
+
         // 1. Gather all local files
         this.setStatus("扫描本地文件...", true);
         const localFiles = this.app.vault.getFiles().filter((f) => !this.shouldIgnore(f.path));
@@ -547,15 +550,80 @@ export class SyncEngine {
 
   private rememberIdenticalVersion(path: string, local: FileStateInspection,
     remote: FileStateInspection, base?: any): boolean {
-    if (!sameFileVersion(local,remote) || !remote.fsId) return false;
-    if (base?.localMd5 === local.md5 && base?.remoteMd5 === remote.md5 &&
-        base?.remoteFsId === remote.fsId) return false;
-    this.stateStore.set(path,{path,localMtime:local.mtime!,localMd5:local.md5!,
-      remoteFsId:remote.fsId,remoteMtime:remote.mtime!,remoteMd5:remote.md5!,lastSyncTime:Date.now()});
-    return true;
+    if (!sameFileContent(local, remote) || !remote.fsId) return false;
+    if (base?.localMd5?.toLowerCase() === local.md5?.toLowerCase() &&
+        base?.remoteMd5?.toLowerCase() === remote.md5?.toLowerCase() &&
+        (!base?.remoteFsId || base?.remoteFsId === remote.fsId)) return false;
+    if (typeof this.stateStore.set === "function") {
+      this.stateStore.set(path, {
+        path,
+        localMtime: local.mtime ?? 0,
+        localMd5: local.md5!,
+        remoteFsId: remote.fsId,
+        remoteMtime: remote.mtime ?? 0,
+        remoteMd5: remote.md5 || local.md5!,
+        lastSyncTime: Date.now()
+      });
+      return true;
+    }
+    return false;
   }
 
   public getPendingConflicts(): PendingConflict[] { return this.stateStore.getConflicts?.() || []; }
+
+  public async autoResolveIdenticalConflicts(): Promise<number> {
+    const conflicts = this.getPendingConflicts();
+    if (!conflicts.length) return 0;
+    let resolvedCount = 0;
+    for (const conflict of conflicts) {
+      try {
+        const local = await this.inspectLocalFile(conflict.path);
+        if (!local.exists || !local.md5) continue;
+        let matched = false;
+        if (conflict.remote.exists && conflict.remote.md5 &&
+            conflict.remote.md5.toLowerCase() === local.md5.toLowerCase()) {
+          matched = true;
+        }
+        if (!matched) {
+          for (const copy of conflict.copies) {
+            if (await this.app.vault.adapter.exists(copy)) {
+              const copyBytes = await this.atomicFs.readBinary(copy);
+              if (calculateMd5(copyBytes).toLowerCase() === local.md5.toLowerCase()) {
+                matched = true;
+                break;
+              }
+            }
+          }
+        }
+        if (matched) {
+          for (const copy of conflict.copies) {
+            if (await this.app.vault.adapter.exists(copy)) {
+              try { await this.atomicFs.safeDelete(copy); } catch {}
+            }
+          }
+          this.stateStore.set(conflict.path, {
+            path: conflict.path,
+            localMtime: local.mtime!,
+            localMd5: local.md5,
+            remoteFsId: conflict.remote.fsId,
+            remoteMtime: conflict.remote.mtime || local.mtime!,
+            remoteMd5: conflict.remote.md5 || local.md5,
+            lastSyncTime: Date.now()
+          });
+          this.stateStore.clearConflict(conflict.path);
+          resolvedCount++;
+          this.log("info", `文件内容完全一致，已自动标记为已解决并清理副本: ${conflict.path}`);
+        }
+      } catch (err: any) {
+        // Safe fallback
+      }
+    }
+    if (resolvedCount > 0) {
+      await this.stateStore.save();
+      this.log("info", `已自动解决并清理 ${resolvedCount} 个内容完全一致的历史冲突`);
+    }
+    return resolvedCount;
+  }
 
   /** Keep the original and the remote snapshot; never advance the baseline or
    * make a remote mutation until the user explicitly confirms resolution. */
@@ -577,24 +645,32 @@ export class SyncEngine {
       // downloaded/decrypted bytes against a fresh local read before deduping.
       const current = await this.inspectLocalFile(localPath);
       const plaintextMd5 = calculateMd5(data);
-      if (sameFileVersion(current,{...remote,md5:plaintextMd5})) {
-        this.stateStore.set(localPath,{path:localPath,localMtime:current.mtime!,localMd5:current.md5!,
-          remoteFsId:remote.fsId,remoteMtime:remote.mtime!,remoteMd5:remote.md5 || plaintextMd5,lastSyncTime:Date.now()});
+      if (current.exists && current.md5 && current.md5.toLowerCase() === plaintextMd5.toLowerCase()) {
+        this.stateStore.set(localPath, {
+          path: localPath,
+          localMtime: current.mtime!,
+          localMd5: current.md5!,
+          remoteFsId: remote.fsId,
+          remoteMtime: remote.mtime!,
+          remoteMd5: remote.md5 || plaintextMd5,
+          lastSyncTime: Date.now()
+        });
         if (existing) this.stateStore.clearConflict(localPath);
         try { await this.stateStore.save(); }
         catch (error) { if (existing) this.stateStore.setConflict(existing); throw error; }
         for (const copy of existing?.copies || []) {
           if (await this.app.vault.adapter.exists(copy)) {
             const bytes = await this.atomicFs.readBinary(copy);
-            if (calculateMd5(bytes) === plaintextMd5) {
+            if (calculateMd5(bytes).toLowerCase() === plaintextMd5.toLowerCase()) {
               try { await this.atomicFs.safeDelete(copy); }
-              catch { this.log("warn",`已去除冲突标记；重复副本保留待手动清理: ${copy}`); }
+              catch { this.log("warn", `已去除冲突标记；重复副本保留待手动清理: ${copy}`); }
             }
           }
         }
-        decision.action="noop";decision.isConflict=false;
-        this.setStatus("相同版本已合并",false);
-        this.log("info",`内容及修改时间相同，保留原文件: ${localPath}`);
+        decision.action = "noop";
+        decision.isConflict = false;
+        this.setStatus("相同内容已自动解决", false);
+        this.log("info", `两端文件内容一模一样，已自动标记为已解决并更新基准: ${localPath}`);
         return;
       }
       const strategy = this.getSettings().conflictStrategy || "create_conflict_file";

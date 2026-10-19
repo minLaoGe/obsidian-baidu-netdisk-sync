@@ -16,9 +16,15 @@ export interface ConflictDecision {
   conflictSubtype?: "both_modified" | "remote_deleted_local_modified" | "local_deleted_remote_modified";
 }
 
+/** Check whether two files have identical content hash (case-insensitive MD5) */
+export function sameFileContent(local: FileStateInspection, remote: FileStateInspection): boolean {
+  return !!(local.exists && remote.exists && local.md5 && remote.md5 &&
+    local.md5.toLowerCase() === remote.md5.toLowerCase());
+}
+
 /** Baidu timestamps have second precision; unknown timestamps never qualify. */
 export function sameFileVersion(local: FileStateInspection, remote: FileStateInspection): boolean {
-  return local.exists && remote.exists && !!local.md5 && local.md5 === remote.md5 &&
+  return sameFileContent(local, remote) &&
     typeof local.mtime === "number" && Number.isFinite(local.mtime) &&
     typeof remote.mtime === "number" && Number.isFinite(remote.mtime) &&
     Math.floor(local.mtime / 1000) === Math.floor(remote.mtime / 1000);
@@ -33,7 +39,10 @@ export function determineSyncAction(
   base?: SyncMetadataEntry,
   verifiedIncrementalDeletion = false
 ): ConflictDecision {
-  if (sameFileVersion(local,remote)) return {action:"noop",reason:"Verified identical content and modification time",isConflict:false};
+  // If content is identical on both sides, auto-resolve as noop without creating conflict
+  if (sameFileContent(local, remote)) {
+    return { action: "noop", reason: "两端内容完全一致（MD5相同），自动标记为已解决", isConflict: false };
+  }
   // Scenario 1: File is in Base snapshot
   if (base) {
     const localChanged = !local.exists || local.md5 !== base.localMd5;
@@ -73,9 +82,9 @@ export function determineSyncAction(
 
     // 1.7 Both changed / deleted symmetrically
     if (local.exists && remote.exists) {
-      if (local.md5 === remote.md5) {
+      if (sameFileContent(local, remote)) {
         // Content converged to the same state
-        return { action: "noop", reason: "Both modified to identical content", isConflict: false };
+        return { action: "noop", reason: "两端内容完全一致（MD5相同），自动标记为已解决", isConflict: false };
       }
       // True conflict: both modified with different contents
       return {
@@ -123,8 +132,8 @@ export function determineSyncAction(
   }
 
   if (local.exists && remote.exists) {
-    if (local.md5 === remote.md5) {
-      return { action: "noop", reason: "Files exist on both sides with identical hash", isConflict: false };
+    if (sameFileContent(local, remote)) {
+      return { action: "noop", reason: "两端内容完全一致（MD5相同），自动标记为已解决", isConflict: false };
     }
     // Both exist on first sync but differ -> Conflict
     return {

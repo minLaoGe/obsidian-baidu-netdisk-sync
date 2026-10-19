@@ -1941,11 +1941,13 @@ function hasConflictMarkers(text) {
 var import_obsidian5 = require("obsidian");
 
 // src/sync/conflict.ts
-function sameFileVersion(local, remote) {
-  return local.exists && remote.exists && !!local.md5 && local.md5 === remote.md5 && typeof local.mtime === "number" && Number.isFinite(local.mtime) && typeof remote.mtime === "number" && Number.isFinite(remote.mtime) && Math.floor(local.mtime / 1e3) === Math.floor(remote.mtime / 1e3);
+function sameFileContent(local, remote) {
+  return !!(local.exists && remote.exists && local.md5 && remote.md5 && local.md5.toLowerCase() === remote.md5.toLowerCase());
 }
 function determineSyncAction(local, remote, base, verifiedIncrementalDeletion = false) {
-  if (sameFileVersion(local, remote)) return { action: "noop", reason: "Verified identical content and modification time", isConflict: false };
+  if (sameFileContent(local, remote)) {
+    return { action: "noop", reason: "\u4E24\u7AEF\u5185\u5BB9\u5B8C\u5168\u4E00\u81F4\uFF08MD5\u76F8\u540C\uFF09\uFF0C\u81EA\u52A8\u6807\u8BB0\u4E3A\u5DF2\u89E3\u51B3", isConflict: false };
+  }
   if (base) {
     const localChanged = !local.exists || local.md5 !== base.localMd5;
     const remoteChanged = !remote.exists || remote.md5 !== base.remoteMd5;
@@ -1970,8 +1972,8 @@ function determineSyncAction(local, remote, base, verifiedIncrementalDeletion = 
       return { action: "download", reason: "Modified remotely, download to local", isConflict: false };
     }
     if (local.exists && remote.exists) {
-      if (local.md5 === remote.md5) {
-        return { action: "noop", reason: "Both modified to identical content", isConflict: false };
+      if (sameFileContent(local, remote)) {
+        return { action: "noop", reason: "\u4E24\u7AEF\u5185\u5BB9\u5B8C\u5168\u4E00\u81F4\uFF08MD5\u76F8\u540C\uFF09\uFF0C\u81EA\u52A8\u6807\u8BB0\u4E3A\u5DF2\u89E3\u51B3", isConflict: false };
       }
       return {
         action: "conflict",
@@ -2010,8 +2012,8 @@ function determineSyncAction(local, remote, base, verifiedIncrementalDeletion = 
     return { action: "download", reason: "New remote file", isConflict: false };
   }
   if (local.exists && remote.exists) {
-    if (local.md5 === remote.md5) {
-      return { action: "noop", reason: "Files exist on both sides with identical hash", isConflict: false };
+    if (sameFileContent(local, remote)) {
+      return { action: "noop", reason: "\u4E24\u7AEF\u5185\u5BB9\u5B8C\u5168\u4E00\u81F4\uFF08MD5\u76F8\u540C\uFF09\uFF0C\u81EA\u52A8\u6807\u8BB0\u4E3A\u5DF2\u89E3\u51B3", isConflict: false };
     }
     return {
       action: "conflict",
@@ -2361,6 +2363,7 @@ var SyncEngine = class {
       this.setStatus("\u6B63\u5728\u540C\u6B65...", true);
       this.log("info", "\u5F00\u59CB\u68C0\u67E5\u540C\u6B65\u53D8\u66F4...");
       try {
+        await this.autoResolveIdenticalConflicts();
         this.setStatus("\u626B\u63CF\u672C\u5730\u6587\u4EF6...", true);
         const localFiles = this.app.vault.getFiles().filter((f) => !this.shouldIgnore(f.path));
         const localMap = /* @__PURE__ */ new Map();
@@ -2631,21 +2634,78 @@ var SyncEngine = class {
     return this.getSettings().incrementalSync && !this.batchJournalActive ? this.remoteIndex().mutate(path, operation) : operation();
   }
   rememberIdenticalVersion(path, local, remote, base) {
-    if (!sameFileVersion(local, remote) || !remote.fsId) return false;
-    if (base?.localMd5 === local.md5 && base?.remoteMd5 === remote.md5 && base?.remoteFsId === remote.fsId) return false;
-    this.stateStore.set(path, {
-      path,
-      localMtime: local.mtime,
-      localMd5: local.md5,
-      remoteFsId: remote.fsId,
-      remoteMtime: remote.mtime,
-      remoteMd5: remote.md5,
-      lastSyncTime: Date.now()
-    });
-    return true;
+    if (!sameFileContent(local, remote) || !remote.fsId) return false;
+    if (base?.localMd5?.toLowerCase() === local.md5?.toLowerCase() && base?.remoteMd5?.toLowerCase() === remote.md5?.toLowerCase() && (!base?.remoteFsId || base?.remoteFsId === remote.fsId)) return false;
+    if (typeof this.stateStore.set === "function") {
+      this.stateStore.set(path, {
+        path,
+        localMtime: local.mtime ?? 0,
+        localMd5: local.md5,
+        remoteFsId: remote.fsId,
+        remoteMtime: remote.mtime ?? 0,
+        remoteMd5: remote.md5 || local.md5,
+        lastSyncTime: Date.now()
+      });
+      return true;
+    }
+    return false;
   }
   getPendingConflicts() {
     return this.stateStore.getConflicts?.() || [];
+  }
+  async autoResolveIdenticalConflicts() {
+    const conflicts = this.getPendingConflicts();
+    if (!conflicts.length) return 0;
+    let resolvedCount = 0;
+    for (const conflict of conflicts) {
+      try {
+        const local = await this.inspectLocalFile(conflict.path);
+        if (!local.exists || !local.md5) continue;
+        let matched = false;
+        if (conflict.remote.exists && conflict.remote.md5 && conflict.remote.md5.toLowerCase() === local.md5.toLowerCase()) {
+          matched = true;
+        }
+        if (!matched) {
+          for (const copy of conflict.copies) {
+            if (await this.app.vault.adapter.exists(copy)) {
+              const copyBytes = await this.atomicFs.readBinary(copy);
+              if (calculateMd5(copyBytes).toLowerCase() === local.md5.toLowerCase()) {
+                matched = true;
+                break;
+              }
+            }
+          }
+        }
+        if (matched) {
+          for (const copy of conflict.copies) {
+            if (await this.app.vault.adapter.exists(copy)) {
+              try {
+                await this.atomicFs.safeDelete(copy);
+              } catch {
+              }
+            }
+          }
+          this.stateStore.set(conflict.path, {
+            path: conflict.path,
+            localMtime: local.mtime,
+            localMd5: local.md5,
+            remoteFsId: conflict.remote.fsId,
+            remoteMtime: conflict.remote.mtime || local.mtime,
+            remoteMd5: conflict.remote.md5 || local.md5,
+            lastSyncTime: Date.now()
+          });
+          this.stateStore.clearConflict(conflict.path);
+          resolvedCount++;
+          this.log("info", `\u6587\u4EF6\u5185\u5BB9\u5B8C\u5168\u4E00\u81F4\uFF0C\u5DF2\u81EA\u52A8\u6807\u8BB0\u4E3A\u5DF2\u89E3\u51B3\u5E76\u6E05\u7406\u526F\u672C: ${conflict.path}`);
+        }
+      } catch (err) {
+      }
+    }
+    if (resolvedCount > 0) {
+      await this.stateStore.save();
+      this.log("info", `\u5DF2\u81EA\u52A8\u89E3\u51B3\u5E76\u6E05\u7406 ${resolvedCount} \u4E2A\u5185\u5BB9\u5B8C\u5168\u4E00\u81F4\u7684\u5386\u53F2\u51B2\u7A81`);
+    }
+    return resolvedCount;
   }
   /** Keep the original and the remote snapshot; never advance the baseline or
    * make a remote mutation until the user explicitly confirms resolution. */
@@ -2663,7 +2723,7 @@ var SyncEngine = class {
       }
       const current = await this.inspectLocalFile(localPath);
       const plaintextMd5 = calculateMd5(data);
-      if (sameFileVersion(current, { ...remote, md5: plaintextMd5 })) {
+      if (current.exists && current.md5 && current.md5.toLowerCase() === plaintextMd5.toLowerCase()) {
         this.stateStore.set(localPath, {
           path: localPath,
           localMtime: current.mtime,
@@ -2683,7 +2743,7 @@ var SyncEngine = class {
         for (const copy of existing?.copies || []) {
           if (await this.app.vault.adapter.exists(copy)) {
             const bytes = await this.atomicFs.readBinary(copy);
-            if (calculateMd5(bytes) === plaintextMd5) {
+            if (calculateMd5(bytes).toLowerCase() === plaintextMd5.toLowerCase()) {
               try {
                 await this.atomicFs.safeDelete(copy);
               } catch {
@@ -2694,8 +2754,8 @@ var SyncEngine = class {
         }
         decision.action = "noop";
         decision.isConflict = false;
-        this.setStatus("\u76F8\u540C\u7248\u672C\u5DF2\u5408\u5E76", false);
-        this.log("info", `\u5185\u5BB9\u53CA\u4FEE\u6539\u65F6\u95F4\u76F8\u540C\uFF0C\u4FDD\u7559\u539F\u6587\u4EF6: ${localPath}`);
+        this.setStatus("\u76F8\u540C\u5185\u5BB9\u5DF2\u81EA\u52A8\u89E3\u51B3", false);
+        this.log("info", `\u4E24\u7AEF\u6587\u4EF6\u5185\u5BB9\u4E00\u6A21\u4E00\u6837\uFF0C\u5DF2\u81EA\u52A8\u6807\u8BB0\u4E3A\u5DF2\u89E3\u51B3\u5E76\u66F4\u65B0\u57FA\u51C6: ${localPath}`);
         return;
       }
       const strategy = this.getSettings().conflictStrategy || "create_conflict_file";

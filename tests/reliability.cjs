@@ -180,15 +180,26 @@ function ok(value, message) { assert.ok(value, message); checks++; }
     await engine.resolveConflict('note.md','/note.md',decision,local,remote);
     assert.equal(decision.action,'noop');assert.equal(engine.getPendingConflicts().length,0);checks+=2;
     assert.equal(engine.stateStore.get('note.md').remoteMd5,'opaque-server-hash');checks++;
-    // Same bytes with different or missing timestamps still need review.
-    await engine.resolveConflict('note.md','/note.md',{action:'conflict'},local,{...remote,mtime:2000});
-    const record=engine.getPendingConflicts()[0];assert.equal(record.copies.length,1);checks++;
+    // Same bytes with different or missing timestamps are now auto-resolved without review.
+    let decisionDiff = {action: 'conflict'};
+    await engine.resolveConflict('note.md','/note.md',decisionDiff,local,{...remote,mtime:2000});
+    assert.equal(decisionDiff.action, 'noop');
+    assert.equal(engine.getPendingConflicts().length, 0); checks += 2;
+
+    // Truly different content needs review and creates a conflict record.
+    let remotePayload = enc.encode('different content');
+    const diffEngine = new SyncEngine(app,()=>({}),{downloadFile:async()=>remotePayload.buffer,uploadFile:async()=>{throw Error('must not upload')}});
+    await diffEngine.resolveConflict('note.md','/note.md',{action:'conflict'},local,{...remote,md5:'diff-hash',mtime:2000});
+    const record=diffEngine.getPendingConflicts()[0];assert.equal(record.copies.length,1);checks++;
     const edited='note.conflict-20261019-000000-edited.md';d.files.set(edited,enc.encode('manual edit'));
     record.copies.push(edited);
-    await engine.resolveConflict('note.md','/note.md',{action:'conflict'},local,remote);
-    assert.equal(engine.getPendingConflicts().length,0);assert.equal(d.files.has(record.copies[0]),false);assert.equal(await d.read(edited),'manual edit');assert.equal(await d.read('note.md'),'same');checks+=4;
-    await engine.resolveConflict('note.md','/note.md',{action:'conflict'},local,{...remote,mtime:undefined});
-    assert.equal(engine.getPendingConflicts().length,1);checks++;
+    // When file content becomes identical, conflict is auto-resolved and identical copy cleaned up
+    d.files.set(record.copies[0], enc.encode('same'));
+    remotePayload = enc.encode('same');
+    await diffEngine.resolveConflict('note.md','/note.md',{action:'conflict'},local,{...remote,md5:'diff-hash'});
+    assert.equal(diffEngine.getPendingConflicts().length,0);assert.equal(d.files.has(record.copies[0]),false);assert.equal(await d.read(edited),'manual edit');assert.equal(await d.read('note.md'),'same');checks+=4;
+    await diffEngine.resolveConflict('note.md','/note.md',{action:'conflict'},local,{exists:false});
+    assert.equal(diffEngine.getPendingConflicts().length,1);checks++;
   }
   // Conflict-page deletions are local-only, constrained, and retain pending state.
   {
