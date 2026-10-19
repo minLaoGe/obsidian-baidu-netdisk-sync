@@ -17,6 +17,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   incrementalSync: true,
   syncPaused: false,
   uploadConcurrency: 3,
+  downloadConcurrency: 3,
   syncIntervalMinutes: 15,
   syncOnStartup: true,
   syncOnModifyDebounceSeconds: 3,
@@ -335,12 +336,24 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("上传并发数")
-      .setDesc("全量同步同时上传 1–3 个不同文件；单文件提交、下载、冲突处理和本地原子写入仍保持顺序。")
+      .setDesc("全量同步同时上传 1–3 个不同文件；单文件提交仍保持顺序。")
       .addDropdown((dropdown) =>
         dropdown.addOptions({ "1": "1（串行）", "2": "2", "3": "3（推荐）" })
           .setValue(String(this.plugin.settings.uploadConcurrency || 3))
           .onChange(async (value) => {
             this.plugin.settings.uploadConcurrency = Number(value);
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("下载并发数")
+      .setDesc("全量同步同时拉取 1–3 个不同文件；单文件写盘互斥与防覆盖冲突保护仍保持顺序。")
+      .addDropdown((dropdown) =>
+        dropdown.addOptions({ "1": "1（串行）", "2": "2", "3": "3（推荐）" })
+          .setValue(String(this.plugin.settings.downloadConcurrency || this.plugin.settings.uploadConcurrency || 3))
+          .onChange(async (value) => {
+            this.plugin.settings.downloadConcurrency = Number(value);
             await this.plugin.saveSettings();
           })
       );

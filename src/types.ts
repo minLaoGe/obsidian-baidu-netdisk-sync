@@ -20,6 +20,7 @@ export interface PluginSettings {
   incrementalSync: boolean;
   syncPaused: boolean;
   uploadConcurrency: number; // 1–3 different files; per-file upload phases remain ordered
+  downloadConcurrency?: number; // 1–3 different files; per-file download phases remain ordered
   syncIntervalMinutes: number;
   syncOnStartup: boolean;
   syncOnModifyDebounceSeconds: number; // Debounce delay before syncing modified files
