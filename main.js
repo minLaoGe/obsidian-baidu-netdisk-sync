@@ -899,6 +899,7 @@ var DEFAULT_SETTINGS = {
   username: "",
   remoteBasePath: "/apps/obsidian-vault",
   autoSync: false,
+  mobileManualSync: import_obsidian2.Platform.isMobile,
   incrementalSync: true,
   syncPaused: false,
   uploadConcurrency: 3,
@@ -922,6 +923,16 @@ var BaiduSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     new import_obsidian2.Setting(containerEl).setName("\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u8BBE\u7F6E (Baidu Netdisk Sync)").setHeading();
+    if (import_obsidian2.Platform.isMobile) {
+      new import_obsidian2.Setting(containerEl).setName("\u624B\u673A\u624B\u52A8\u540C\u6B65\u6A21\u5F0F").setDesc("\u5F00\u542F\u65F6\u4EC5\u70B9\u51FB\u7ACB\u5373\u540C\u6B65\u624D\u4F20\u8F93\u6587\u4EF6\uFF0C\u5173\u95ED\u542F\u52A8\u3001\u5B9A\u65F6\u548C\u6587\u4EF6\u53D8\u52A8\u89E6\u53D1\u3002\u540C\u6B65\u65F6\u8BF7\u4FDD\u6301 Obsidian \u5728\u524D\u53F0\u3002").addToggle((toggle) => toggle.setValue(this.plugin.settings.mobileManualSync).onChange(async (value) => {
+        this.plugin.settings.mobileManualSync = value;
+        await this.plugin.saveSettings();
+        this.plugin.resetAutoSyncTimer();
+      }));
+      new import_obsidian2.Setting(containerEl).setName("\u624B\u673A\u540C\u6B65").addButton((button) => button.setButtonText("\u7ACB\u5373\u540C\u6B65").setCta().onClick(async () => {
+        await this.plugin.runSync();
+      })).addButton((button) => button.setButtonText("\u67E5\u770B\u51B2\u7A81").onClick(() => this.plugin.openConflictReview()));
+    }
     new import_obsidian2.Setting(containerEl).setName("1. \u767E\u5EA6\u7F51\u76D8\u8D26\u53F7\u6388\u6743 (OAuth 2.0)").setHeading();
     const guideBox = containerEl.createDiv({ cls: "baidu-sync-card" });
     guideBox.addClass("baidu-sync-ui-1");
@@ -1250,9 +1261,15 @@ var ConfigExportModal = class extends import_obsidian2.Modal {
         new import_obsidian2.Notice(`\u751F\u6210\u5931\u8D25: ${err.message || String(err)}`);
       }
     };
-    copyBtn.onclick = () => {
-      navigator.clipboard.writeText(this.generatedCode);
-      new import_obsidian2.Notice("\u914D\u5BF9\u7801\u5DF2\u590D\u5236\u5230\u526A\u8D34\u677F\uFF01\u53BB\u624B\u673A\u7AEF\u7C98\u8D34\u5373\u53EF\u5BFC\u5165\u3002");
+    copyBtn.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(this.generatedCode);
+        new import_obsidian2.Notice("\u914D\u5BF9\u7801\u5DF2\u590D\u5236\u5230\u526A\u8D34\u677F\uFF01\u53BB\u624B\u673A\u7AEF\u7C98\u8D34\u5373\u53EF\u5BFC\u5165\u3002");
+      } catch {
+        resultArea.focus();
+        resultArea.select();
+        new import_obsidian2.Notice("\u65E0\u6CD5\u8BBF\u95EE\u526A\u8D34\u677F\uFF0C\u8BF7\u957F\u6309\u914D\u5BF9\u7801\u624B\u52A8\u590D\u5236\u3002");
+      }
     };
   }
   onClose() {
@@ -1568,7 +1585,6 @@ var AtomicFileSystem = class {
 };
 
 // src/sync/remote-index.ts
-var import_crypto4 = require("crypto");
 var INDEX_DIR = ".baidu-sync-index-v1";
 var AUDIT_INTERVAL = 24 * 60 * 60 * 1e3;
 function validPath(path) {
@@ -1710,7 +1726,7 @@ var RemoteIndex = class {
     for (const path of [...new Set(paths)]) {
       let group = groups[groups.length - 1];
       if (!group || group.paths.length >= 200 || JSON.stringify([...group.paths, path]).length > 12e3) {
-        group = { id: (0, import_crypto4.randomBytes)(16).toString("hex"), paths: [] };
+        group = { id: Array.from(globalThis.crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join(""), paths: [] };
         groups.push(group);
       }
       group.paths.push(path);
@@ -2011,6 +2027,8 @@ var SyncEngine = class {
     this.syncMutex = new Mutex();
     this.interactiveConflictRequests = 0;
     this.batchJournalActive = false;
+    this.disposed = false;
+    this.lastConflictNoticeAt = 0;
     this.taskQueue = new FifoQueue();
     this.debounceManager = new DebounceManager();
     this.isSyncing = false;
@@ -2019,6 +2037,20 @@ var SyncEngine = class {
     this.atomicFs = new AtomicFileSystem(app);
     this.stateStore = new SyncStateStore(app);
     this.onStatusChange = onStatusChange;
+  }
+  dispose() {
+    this.disposed = true;
+    this.debounceManager.clearAll();
+  }
+  automaticSyncBlocked() {
+    return this.disposed || this.getSettings().syncPaused || !!(import_obsidian4.Platform.isMobile && this.getSettings().mobileManualSync);
+  }
+  notifyConflict() {
+    if (this.isSyncing || this.interactiveConflictRequests > 0) return;
+    const now = Date.now();
+    if (now - this.lastConflictNoticeAt < 1e4) return;
+    this.lastConflictNoticeAt = now;
+    new import_obsidian4.Notice("\u767E\u5EA6\u540C\u6B65\u53D1\u73B0\u5F85\u5904\u7406\u51B2\u7A81\uFF0C\u8BF7\u70B9\u51FB\u72B6\u6001\u680F\u67E5\u770B\u5E76\u89E3\u51B3\u3002\u5176\u4ED6\u6587\u4EF6\u7EE7\u7EED\u540C\u6B65\u3002", 1e4);
   }
   updateClient(client) {
     this.client = client;
@@ -2091,7 +2123,7 @@ var SyncEngine = class {
    * Register local vault file modification with debounce for ordering
    */
   handleLocalFileModified(file) {
-    if (this.getSettings().syncPaused) return;
+    if (this.automaticSyncBlocked()) return;
     if (!(file instanceof import_obsidian4.TFile)) return;
     if (this.shouldIgnore(file.path)) return;
     const debounceSeconds = this.getSettings().syncOnModifyDebounceSeconds || 3;
@@ -2105,7 +2137,7 @@ var SyncEngine = class {
    * Register local vault file deletion with debounce
    */
   handleLocalFileDeleted(file) {
-    if (this.getSettings().syncPaused) return;
+    if (this.automaticSyncBlocked()) return;
     if (this.shouldIgnore(file.path)) return;
     this.debounceManager.debounce(file.path, 1e3, () => {
       this.taskQueue.enqueue(async () => {
@@ -2121,7 +2153,7 @@ var SyncEngine = class {
     return this.syncMutex.acquire(async () => {
       try {
         const settings = this.getSettings();
-        if (!settings.accessToken || settings.syncPaused) return;
+        if (this.disposed || !settings.accessToken || settings.syncPaused || localChangeOnly && this.automaticSyncBlocked()) return;
         const remotePath = toRemotePath(settings.remoteBasePath, vaultPath);
         const base = this.stateStore.get(vaultPath);
         const localInspection = await this.inspectLocalFile(vaultPath);
@@ -2156,7 +2188,7 @@ var SyncEngine = class {
         errors: []
       };
       const settings = this.getSettings();
-      if (settings.syncPaused) {
+      if (this.disposed || settings.syncPaused) {
         this.setStatus("\u5DF2\u6682\u505C", false);
         return result;
       }
@@ -2310,7 +2342,7 @@ var SyncEngine = class {
         }
         this.setStatus(this.getSettings().syncPaused ? "\u5DF2\u6682\u505C" : this.getPendingConflicts().length ? "\u90E8\u5206\u6587\u4EF6\u5F85\u4EBA\u5DE5\u89E3\u51B3\u51B2\u7A81" : "\u5DF2\u540C\u6B65", false);
         const summary = `${this.interactiveConflictRequests ? "\u540C\u6B65\u5DF2\u8BA9\u51FA\u6267\u884C\u673A\u4F1A\u7ED9\u51B2\u7A81\u5904\u7406\uFF0C\u5269\u4F59\u6587\u4EF6\u4E0B\u6B21\u7EE7\u7EED" : "\u540C\u6B65\u5B8C\u6210"}: \u8DF3\u8FC7${result.skipped} \u2191${result.uploaded} \u2193${result.downloaded} \u26A0${result.conflicted} \u2715${result.deleted}${result.errors.length ? ` (\u5931\u8D25: ${result.errors.length})` : ""}`;
-        new import_obsidian4.Notice(summary);
+        new import_obsidian4.Notice(summary + (result.conflicted ? "\uFF1B\u51B2\u7A81\u8BF7\u70B9\u51FB\u72B6\u6001\u680F\u5904\u7406" : ""));
         this.log("info", `${summary}\uFF1B\u603B\u8017\u65F6 ${((Date.now() - startedAt) / 1e3).toFixed(1)}s`);
       } catch (err) {
         if (err.message === "SYNC_YIELD_FOR_CONFLICT") {
@@ -2506,8 +2538,7 @@ var SyncEngine = class {
           this.stateStore.setConflict(record2);
           await this.stateStore.save();
           this.log("warn", `\u5DF2\u6309 Git \u683C\u5F0F\u5728\u5355\u6587\u4EF6\u5185\u5408\u5E76\u51B2\u7A81\u6807\u8BB0: ${localPath}`);
-          new import_obsidian4.Notice(`\u767E\u5EA6\u540C\u6B65\u53D1\u73B0\u51B2\u7A81\uFF1A${localPath}
-\u5DF2\u50CF Git \u4E00\u6837\u5728\u6587\u6863\u5185\u76F4\u63A5\u6807\u51FA\u51B2\u7A81\u533A\u57DF\uFF08<<<<<<< LOCAL ... >>>>>>> REMOTE\uFF09\uFF0C\u672A\u4EA7\u751F\u591A\u4F59\u6587\u4EF6\uFF0C\u8BF7\u76F4\u63A5\u5728\u6587\u6863\u4E2D\u7F16\u8F91\u89E3\u51B3\uFF01`, 15e3);
+          this.notifyConflict();
           return;
         }
       }
@@ -2526,7 +2557,7 @@ var SyncEngine = class {
     await this.stateStore.save();
     if (copyPath && data) await this.atomicFs.atomicWrite(copyPath, data, calculateMd5(data));
     this.log("warn", `\u5F85\u4EBA\u5DE5\u89E3\u51B3\u51B2\u7A81: ${localPath}${copyPath ? `\uFF1B\u8FDC\u7AEF\u526F\u672C: ${copyPath}` : "\uFF1B\u8FDC\u7AEF\u5DF2\u5220\u9664"}`);
-    new import_obsidian4.Notice(`\u767E\u5EA6\u540C\u6B65\u53D1\u73B0\u51B2\u7A81\uFF1A${localPath}\u3002\u5DF2\u6682\u505C\u6B64\u6587\u4EF6\u540C\u6B65\uFF0C\u8BF7\u6253\u5F00\u201C\u5F85\u5904\u7406\u51B2\u7A81\u201D\u4EBA\u5DE5\u5408\u5E76\u5E76\u786E\u8BA4\u3002`, 15e3);
+    this.notifyConflict();
   }
   async readConflictMerge(path) {
     const record = this.getPendingConflicts().find((c) => c.path === path);
@@ -2694,7 +2725,7 @@ var SyncEngine = class {
       throw error;
     }
     this.setStatus("\u51B2\u7A81\u5DF2\u5904\u7406", false);
-    new import_obsidian4.Notice(`\u51B2\u7A81\u5DF2\u89E3\u51B3\u5E76\u540C\u6B65\uFF0C\u5DF2\u4ECE\u5217\u8868\u79FB\u9664\uFF1A${path}`);
+    if (!this.interactiveConflictRequests) new import_obsidian4.Notice(`\u51B2\u7A81\u5DF2\u89E3\u51B3\u5E76\u540C\u6B65\uFF0C\u5DF2\u4ECE\u5217\u8868\u79FB\u9664\uFF1A${path}`);
   }
   async inspectLocalFile(vaultPath, cachedFile) {
     const adapter = this.app.vault.adapter;
@@ -2972,34 +3003,38 @@ var BaiduNetdiskSyncPlugin = class extends import_obsidian6.Plugin {
     this.addSettingTab(new BaiduSyncSettingTab(this.app, this));
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
-        this.syncEngine.handleLocalFileModified(file);
+        if (!(import_obsidian6.Platform.isMobile && this.settings.mobileManualSync)) this.syncEngine.handleLocalFileModified(file);
       })
     );
     this.registerEvent(
       this.app.vault.on("create", (file) => {
-        this.syncEngine.handleLocalFileModified(file);
+        if (!(import_obsidian6.Platform.isMobile && this.settings.mobileManualSync)) this.syncEngine.handleLocalFileModified(file);
       })
     );
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
-        this.syncEngine.handleLocalFileDeleted(file);
+        if (!(import_obsidian6.Platform.isMobile && this.settings.mobileManualSync)) this.syncEngine.handleLocalFileDeleted(file);
       })
     );
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
+        if (import_obsidian6.Platform.isMobile && this.settings.mobileManualSync) return;
         this.syncEngine.handleLocalFileDeleted({ path: oldPath });
-        this.syncEngine.handleLocalFileModified(file);
+        if (!(import_obsidian6.Platform.isMobile && this.settings.mobileManualSync)) this.syncEngine.handleLocalFileModified(file);
       })
     );
     this.resetAutoSyncTimer();
-    if (!this.settings.syncPaused && this.settings.syncOnStartup && this.settings.accessToken) {
-      setTimeout(() => {
-        this.runSync();
+    if (!(import_obsidian6.Platform.isMobile && this.settings.mobileManualSync) && !this.settings.syncPaused && this.settings.syncOnStartup && this.settings.accessToken) {
+      this.startupSyncTimeoutId = window.setTimeout(() => {
+        this.startupSyncTimeoutId = void 0;
+        if (!(import_obsidian6.Platform.isMobile && this.settings.mobileManualSync) && !this.settings.syncPaused) void this.runSync();
       }, 3e3);
     }
   }
   onunload() {
     console.log("Unloading Baidu Netdisk Sync Plugin...");
+    this.syncEngine?.dispose();
+    if (this.startupSyncTimeoutId !== void 0) window.clearTimeout(this.startupSyncTimeoutId);
     if (this.autoSyncIntervalId) {
       window.clearInterval(this.autoSyncIntervalId);
     }
@@ -3043,14 +3078,18 @@ var BaiduNetdiskSyncPlugin = class extends import_obsidian6.Plugin {
     await this.syncEngine.runFullSync(forceFull);
   }
   resetAutoSyncTimer() {
+    if (this.startupSyncTimeoutId !== void 0) {
+      window.clearTimeout(this.startupSyncTimeoutId);
+      this.startupSyncTimeoutId = void 0;
+    }
     if (this.autoSyncIntervalId) {
       window.clearInterval(this.autoSyncIntervalId);
       this.autoSyncIntervalId = void 0;
     }
-    if (!this.settings.syncPaused && this.settings.autoSync && this.settings.syncIntervalMinutes > 0) {
+    if (!(import_obsidian6.Platform.isMobile && this.settings.mobileManualSync) && !this.settings.syncPaused && this.settings.autoSync && this.settings.syncIntervalMinutes > 0) {
       const intervalMs = this.settings.syncIntervalMinutes * 60 * 1e3;
       this.autoSyncIntervalId = window.setInterval(() => {
-        this.runSync();
+        if (!(import_obsidian6.Platform.isMobile && this.settings.mobileManualSync) && !this.settings.syncPaused) void this.runSync();
       }, intervalMs);
       console.log(`Auto sync scheduled every ${this.settings.syncIntervalMinutes} minutes.`);
     }

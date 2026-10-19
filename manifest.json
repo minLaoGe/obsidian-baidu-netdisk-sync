@@ -1,10 +1,10 @@
 {
   "id": "baidu-sync",
   "name": "Baidu Sync Safe",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "minAppVersion": "1.14.4",
-  "description": "Sync files with Baidu Netdisk using conflict copies, optional end-to-end encryption, and recoverable desktop file replacement.",
+  "description": "Sync vault files with Baidu Netdisk using recoverable writes and manual mobile synchronization.",
   "author": "minLaoGe",
   "authorUrl": "https://github.com/minLaoGe",
-  "isDesktopOnly": true
+  "isDesktopOnly": false
 }

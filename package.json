@@ -1,11 +1,11 @@
 {
   "name": "obsidian-baidu-netdisk-sync",
-  "version": "1.0.4",
-  "description": "Atomic and ordered bidirectional sync plugin for Obsidian with Baidu Netdisk (\u767e\u5ea6\u7f51\u76d8)",
+  "version": "1.0.5",
+  "description": "Atomic and ordered bidirectional sync plugin for Obsidian with Baidu Netdisk (百度网盘)",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
-    "test": "node tests/reliability.cjs && node tests/concurrency.cjs && node tests/upload-protocol.cjs && node tests/delta.cjs && node tests/inventory.cjs && node tests/conflicts-ui.cjs && node tests/merge.cjs && node tests/remote-index.cjs",
+    "test": "node tests/reliability.cjs && node tests/concurrency.cjs && node tests/upload-protocol.cjs && node tests/delta.cjs && node tests/inventory.cjs && node tests/conflicts-ui.cjs && node tests/merge.cjs && node tests/remote-index.cjs && node tests/notifications.cjs && node tests/mobile.cjs",
     "typecheck": "tsc --noEmit",
     "build": "node esbuild.config.mjs production"
   },

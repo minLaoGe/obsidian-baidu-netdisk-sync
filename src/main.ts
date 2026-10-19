@@ -1,4 +1,4 @@
-import { Notice, Plugin } from "obsidian";
+import { Notice, Platform, Plugin } from "obsidian";
 import { BaiduClient } from "./api/baidu-client";
 import { BaiduSyncSettingTab, DEFAULT_SETTINGS } from "./settings";
 import { SyncEngine } from "./sync/engine";
@@ -11,6 +11,7 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
   syncEngine!: SyncEngine;
   private statusBarItem!: HTMLElement;
   private autoSyncIntervalId?: number;
+  private startupSyncTimeoutId?: number;
 
   async onload() {
     console.log("Loading Baidu Netdisk Sync Plugin...");
@@ -76,27 +77,28 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
     // 7. Register Vault Event Listeners with Debounce Ordering
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
-        this.syncEngine.handleLocalFileModified(file);
+        if (!(Platform.isMobile && this.settings.mobileManualSync)) this.syncEngine.handleLocalFileModified(file);
       })
     );
 
     this.registerEvent(
       this.app.vault.on("create", (file) => {
-        this.syncEngine.handleLocalFileModified(file);
+        if (!(Platform.isMobile && this.settings.mobileManualSync)) this.syncEngine.handleLocalFileModified(file);
       })
     );
 
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
-        this.syncEngine.handleLocalFileDeleted(file);
+        if (!(Platform.isMobile && this.settings.mobileManualSync)) this.syncEngine.handleLocalFileDeleted(file);
       })
     );
 
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
+        if (Platform.isMobile && this.settings.mobileManualSync) return;
         // Handle rename as delete old + create new
         this.syncEngine.handleLocalFileDeleted({ path: oldPath } as any);
-        this.syncEngine.handleLocalFileModified(file);
+        if (!(Platform.isMobile && this.settings.mobileManualSync)) this.syncEngine.handleLocalFileModified(file);
       })
     );
 
@@ -104,15 +106,18 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
     this.resetAutoSyncTimer();
 
     // 9. Startup Sync
-    if (!this.settings.syncPaused && this.settings.syncOnStartup && this.settings.accessToken) {
-      setTimeout(() => {
-        this.runSync();
+    if (!(Platform.isMobile && this.settings.mobileManualSync) && !this.settings.syncPaused && this.settings.syncOnStartup && this.settings.accessToken) {
+      this.startupSyncTimeoutId = window.setTimeout(() => {
+        this.startupSyncTimeoutId = undefined;
+        if (!(Platform.isMobile && this.settings.mobileManualSync) && !this.settings.syncPaused) void this.runSync();
       }, 3000); // Wait 3s after startup for vault index to be fully loaded
     }
   }
 
   onunload() {
     console.log("Unloading Baidu Netdisk Sync Plugin...");
+    this.syncEngine?.dispose();
+    if (this.startupSyncTimeoutId !== undefined) window.clearTimeout(this.startupSyncTimeoutId);
     if (this.autoSyncIntervalId) {
       window.clearInterval(this.autoSyncIntervalId);
     }
@@ -157,15 +162,19 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
   }
 
   public resetAutoSyncTimer() {
+    if (this.startupSyncTimeoutId !== undefined) {
+      window.clearTimeout(this.startupSyncTimeoutId);
+      this.startupSyncTimeoutId = undefined;
+    }
     if (this.autoSyncIntervalId) {
       window.clearInterval(this.autoSyncIntervalId);
       this.autoSyncIntervalId = undefined;
     }
 
-    if (!this.settings.syncPaused && this.settings.autoSync && this.settings.syncIntervalMinutes > 0) {
+    if (!(Platform.isMobile && this.settings.mobileManualSync) && !this.settings.syncPaused && this.settings.autoSync && this.settings.syncIntervalMinutes > 0) {
       const intervalMs = this.settings.syncIntervalMinutes * 60 * 1000;
       this.autoSyncIntervalId = window.setInterval(() => {
-        this.runSync();
+        if (!(Platform.isMobile && this.settings.mobileManualSync) && !this.settings.syncPaused) void this.runSync();
       }, intervalMs);
       console.log(`Auto sync scheduled every ${this.settings.syncIntervalMinutes} minutes.`);
     }

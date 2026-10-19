@@ -4,7 +4,6 @@ import { RemoteFileInfo } from "../types";
 import { AtomicFileSystem } from "../utils/atomic";
 import { calculateMd5 } from "../utils/crypto";
 import { normalizeVaultPath, toRemotePath } from "../utils/path";
-import { randomBytes } from "crypto";
 
 export const INDEX_DIR = ".baidu-sync-index-v1";
 const AUDIT_INTERVAL = 24 * 60 * 60 * 1000;
@@ -146,7 +145,7 @@ export class RemoteIndex {
     for(const path of [...new Set(paths)]) {
       let group=groups[groups.length-1];
       if(!group || group.paths.length>=200 || JSON.stringify([...group.paths,path]).length>12000) {
-        group={id:randomBytes(16).toString("hex"),paths:[]};groups.push(group);
+        group={id:Array.from(globalThis.crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2,"0")).join(""),paths:[]};groups.push(group);
       }
       group.paths.push(path);
     }

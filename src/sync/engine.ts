@@ -1,6 +1,6 @@
 import { RemoteIndex, INDEX_DIR } from "./remote-index";
 import { hasConflictMarkers, mergeText } from "./merge";
-import { App, Notice, TAbstractFile, TFile } from "obsidian";
+import { App, Notice, Platform, TAbstractFile, TFile } from "obsidian";
 import { BaiduClient } from "../api/baidu-client";
 import { decryptData, encryptData, isEncrypted } from "../crypto/e2ee";
 import { ConflictDecision, determineSyncAction, FileStateInspection, generateConflictPath, sameFileVersion } from "./conflict";
@@ -18,6 +18,22 @@ export class SyncEngine {
   private syncMutex: Mutex = new Mutex();
   private interactiveConflictRequests=0;
   private batchJournalActive=false;
+  private disposed=false;
+  public dispose(): void {
+    this.disposed=true;
+    this.debounceManager.clearAll();
+  }
+  private automaticSyncBlocked(): boolean {
+    return this.disposed || this.getSettings().syncPaused || !!(Platform.isMobile && this.getSettings().mobileManualSync);
+  }
+  private lastConflictNoticeAt=0;
+  private notifyConflict():void {
+    if(this.isSyncing || this.interactiveConflictRequests>0) return;
+    const now=Date.now();
+    if(now-this.lastConflictNoticeAt<10000) return;
+    this.lastConflictNoticeAt=now;
+    new Notice("百度同步发现待处理冲突，请点击状态栏查看并解决。其他文件继续同步。",10000);
+  }
   private taskQueue: FifoQueue = new FifoQueue();
   private debounceManager: DebounceManager = new DebounceManager();
   private isSyncing: boolean = false;
@@ -121,7 +137,7 @@ export class SyncEngine {
    * Register local vault file modification with debounce for ordering
    */
   public handleLocalFileModified(file: TAbstractFile): void {
-    if (this.getSettings().syncPaused) return;
+    if (this.automaticSyncBlocked()) return;
     if (!(file instanceof TFile)) return;
     if (this.shouldIgnore(file.path)) return;
 
@@ -137,7 +153,7 @@ export class SyncEngine {
    * Register local vault file deletion with debounce
    */
   public handleLocalFileDeleted(file: TAbstractFile): void {
-    if (this.getSettings().syncPaused) return;
+    if (this.automaticSyncBlocked()) return;
     if (this.shouldIgnore(file.path)) return;
 
     this.debounceManager.debounce(file.path, 1000, () => {
@@ -156,7 +172,7 @@ export class SyncEngine {
     return this.syncMutex.acquire(async () => {
       try {
         const settings = this.getSettings();
-        if (!settings.accessToken || settings.syncPaused) return;
+        if (this.disposed || !settings.accessToken || settings.syncPaused || (localChangeOnly && this.automaticSyncBlocked())) return;
 
         const remotePath = toRemotePath(settings.remoteBasePath, vaultPath);
         const base = this.stateStore.get(vaultPath);
@@ -199,7 +215,7 @@ export class SyncEngine {
       };
 
       const settings = this.getSettings();
-      if (settings.syncPaused) { this.setStatus("已暂停",false); return result; }
+      if (this.disposed || settings.syncPaused) { this.setStatus("已暂停",false); return result; }
       if (!settings.accessToken) {
         new Notice("百度网盘同步：请先在设置中填写并授权 Access Token！");
         return result;
@@ -359,7 +375,7 @@ export class SyncEngine {
         const summary = `${this.interactiveConflictRequests ? "同步已让出执行机会给冲突处理，剩余文件下次继续" : "同步完成"}: 跳过${result.skipped} ↑${result.uploaded} ↓${result.downloaded} ⚠${result.conflicted} ✕${result.deleted}${
           result.errors.length ? ` (失败: ${result.errors.length})` : ""
         }`;
-        new Notice(summary);
+        new Notice(summary+(result.conflicted ? "；冲突请点击状态栏处理" : ""));
         this.log("info", `${summary}；总耗时 ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
       } catch (err: any) {
         if(err.message==="SYNC_YIELD_FOR_CONFLICT") {
@@ -568,7 +584,7 @@ export class SyncEngine {
           this.stateStore.setConflict(record);
           await this.stateStore.save();
           this.log("warn", `已按 Git 格式在单文件内合并冲突标记: ${localPath}`);
-          new Notice(`百度同步发现冲突：${localPath}\n已像 Git 一样在文档内直接标出冲突区域（<<<<<<< LOCAL ... >>>>>>> REMOTE），未产生多余文件，请直接在文档中编辑解决！`, 15000);
+          this.notifyConflict();
           return;
         }
       }
@@ -588,7 +604,7 @@ export class SyncEngine {
     await this.stateStore.save();
     if (copyPath && data) await this.atomicFs.atomicWrite(copyPath, data, calculateMd5(data));
     this.log("warn", `待人工解决冲突: ${localPath}${copyPath ? `；远端副本: ${copyPath}` : "；远端已删除"}`);
-    new Notice(`百度同步发现冲突：${localPath}。已暂停此文件同步，请打开“待处理冲突”人工合并并确认。`, 15000);
+    this.notifyConflict();
   }
 
   public async readConflictMerge(path: string) {
@@ -734,7 +750,7 @@ export class SyncEngine {
       // Snapshot copies remain excluded even after resolution; never upload
       // archived remote versions as new notes.
       this.setStatus("冲突已处理", false);
-      new Notice(`冲突已解决并同步，已从列表移除：${path}`);
+      if(!this.interactiveConflictRequests) new Notice(`冲突已解决并同步，已从列表移除：${path}`);
   }
 
   private async inspectLocalFile(vaultPath: string, cachedFile?: TFile): Promise<FileStateInspection> {

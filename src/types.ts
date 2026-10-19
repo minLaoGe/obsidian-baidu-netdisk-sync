@@ -16,6 +16,7 @@ export interface PluginSettings {
   
   // Sync Behaviors
   autoSync: boolean;
+  mobileManualSync: boolean; // Mobile: only explicit sync actions may contact the remote.
   incrementalSync: boolean;
   syncPaused: boolean;
   uploadConcurrency: number; // 1–3 different files; per-file upload phases remain ordered

@@ -1,4 +1,4 @@
-import { App, Modal, Notice, PluginSettingTab, Setting } from "obsidian";
+import { App, Modal, Notice, Platform, PluginSettingTab, Setting } from "obsidian";
 import { BaiduClient } from "./api/baidu-client";
 import { exportEncryptedConfig, importEncryptedConfig } from "./crypto/configShare";
 import { ConflictStrategy, PluginSettings } from "./types";
@@ -13,6 +13,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   username: "",
   remoteBasePath: "/apps/obsidian-vault",
   autoSync: false,
+  mobileManualSync: Platform.isMobile,
   incrementalSync: true,
   syncPaused: false,
   uploadConcurrency: 3,
@@ -42,6 +43,18 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
 
     // Title
     new Setting(containerEl).setName("百度网盘同步设置 (Baidu Netdisk Sync)").setHeading();
+
+    if (Platform.isMobile) {
+      new Setting(containerEl).setName("手机手动同步模式")
+        .setDesc("开启时仅点击立即同步才传输文件，关闭启动、定时和文件变动触发。同步时请保持 Obsidian 在前台。")
+        .addToggle(toggle => toggle.setValue(this.plugin.settings.mobileManualSync).onChange(async value => {
+          this.plugin.settings.mobileManualSync = value;
+          await this.plugin.saveSettings(); this.plugin.resetAutoSyncTimer();
+        }));
+      new Setting(containerEl).setName("手机同步")
+        .addButton(button => button.setButtonText("立即同步").setCta().onClick(async () => { await this.plugin.runSync(); }))
+        .addButton(button => button.setButtonText("查看冲突").onClick(() => this.plugin.openConflictReview()));
+    }
 
     // --- Section 1: Detailed OAuth & Credential Guide ---
     new Setting(containerEl).setName("1. 百度网盘账号授权 (OAuth 2.0)").setHeading();
@@ -541,9 +554,14 @@ class ConfigExportModal extends Modal {
       }
     };
 
-    copyBtn.onclick = () => {
-      navigator.clipboard.writeText(this.generatedCode);
-      new Notice("配对码已复制到剪贴板！去手机端粘贴即可导入。");
+    copyBtn.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(this.generatedCode);
+        new Notice("配对码已复制到剪贴板！去手机端粘贴即可导入。");
+      } catch {
+        resultArea.focus(); resultArea.select();
+        new Notice("无法访问剪贴板，请长按配对码手动复制。");
+      }
     };
   }
 
