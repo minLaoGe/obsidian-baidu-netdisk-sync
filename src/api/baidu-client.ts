@@ -402,6 +402,27 @@ export class BaiduClient {
     }
   }
 
+  /** Synchronous batch request; only explicit per-path acknowledgements commit. */
+  public async deleteFiles(paths: string[]): Promise<Map<string, string | undefined>> {
+    if (!paths.length) return new Map();
+    if (paths.length > 50 || new Set(paths).size !== paths.length) throw new Error("删除批次必须为 1–50 个不同路径");
+    const token = await this.ensureFreshToken();
+    const res = await requestUrl({
+      url: `https://pan.baidu.com/rest/2.0/xpan/file?method=filemanager&opera=delete&access_token=${token}`,
+      method: "POST", headers: {"Content-Type":"application/x-www-form-urlencoded"},
+      body: new URLSearchParams({async:"0",filelist:JSON.stringify(paths)}).toString(),
+    });
+    const data = res.json;
+    const result = new Map<string,string|undefined>();
+    for (const path of paths) {
+      const items = Array.isArray(data.info) ? data.info.filter((x:any)=>x.path===path) : [];
+      const item = items.length === 1 ? items[0] : undefined;
+      result.set(path, item && (item.errno === 0 || item.errno === -9)
+        ? undefined : `删除结果未确认 (总 errno: ${data.errno}, 文件 errno: ${item?.errno ?? "missing"})`);
+    }
+    return result;
+  }
+
   /**
    * Upload file to Baidu Netdisk using 2-phase atomic commit
    * (Precreate -> upload parts -> create commit)

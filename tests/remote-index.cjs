@@ -33,6 +33,7 @@ class Cloud {
  async uploadFile(path,data){if(this.failUpload?.(path))throw Error('upload failed');this.put(path,data);return {fsId:this.files.get(path).info.fsId,md5:this.files.get(path).info.md5};}
  async createDirectory(){}
  async deleteFile(path){this.files.delete(path);}
+ async deleteFiles(paths){for(const p of paths)this.files.delete(p);return new Map(paths.map(p=>[p,undefined]));}
 }
 function setup(){const disk=new Disk(),cloud=new Cloud(),logs=[];const app=appFor(disk);return{disk,cloud,logs,index:new RemoteIndex(app,cloud,'/root','account',m=>logs.push(m),()=>false),app};}
 (async()=>{

@@ -303,13 +303,14 @@ export class SyncEngine {
         const uploads: Array<() => Promise<void>> = [];
         const downloads: Array<() => Promise<void>> = [];
         const serial: Array<() => Promise<void>> = [];
+        const remoteDeletes: Array<{path:string;remotePath:string;base:SyncMetadataEntry}> = [];
         const mutationPaths:string[]=[];
         let completed = 0;
         let completedWork=0;
         let acceptedIdentical = false;
         for (const path of allPaths) {
           if(this.interactiveConflictRequests) break;
-          const totalPlanned = uploads.length + downloads.length + serial.length;
+          const totalPlanned = uploads.length + downloads.length + serial.length + remoteDeletes.length;
           const currentCount = totalPlanned + completed + 1;
           if (currentCount % 25 === 0 || currentCount === allPaths.size || totalPlanned > 0) {
             this.setStatus(`检查本地变更 (${currentCount}/${allPaths.size})`, true);
@@ -326,6 +327,11 @@ export class SyncEngine {
                   size: remoteItem.size, fsId: remoteItem.fsId }
               : { exists: false };
             let decision = determineSyncAction(localInspection, remoteInspection, base, indexed?.incremental === true);
+            if (decision.action === "delete_remote" && base) {
+              remoteDeletes.push({path,remotePath,base});
+              mutationPaths.push(path);
+              continue;
+            }
             if (decision.action === "noop") {
               acceptedIdentical = this.rememberIdenticalVersion(path,localInspection,remoteInspection,base) || acceptedIdentical;
               completed++; result.skipped++; continue;
@@ -333,7 +339,7 @@ export class SyncEngine {
             const work = async () => {
               if (this.getSettings().syncPaused || this.interactiveConflictRequests) return;
               const itemStarted = Date.now();
-              const plannedCount = uploads.length + downloads.length + serial.length;
+              const plannedCount = uploads.length + downloads.length + serial.length + remoteDeletes.length;
               this.currentFiles.add(path); this.setStatus(`同步变更 (${completedWork}/${plannedCount})`, true);
               const wasUpload = decision.action === "upload";
               const wasDownload = decision.action === "download";
@@ -387,7 +393,7 @@ export class SyncEngine {
               } finally {
                 completed++;
                 completedWork++; this.currentFiles.delete(path);
-                const plannedCount = uploads.length + downloads.length + serial.length;
+                const plannedCount = uploads.length + downloads.length + serial.length + remoteDeletes.length;
                 this.setStatus(`同步变更 (${completedWork}/${plannedCount})`, true);
               }
               // Checkpoint only completed commits. Save stays serialized and
@@ -421,8 +427,58 @@ export class SyncEngine {
         if (downloads.length) this.log("info", `下载计划: ${downloads.length} 个文件，并发 ${downloadConcurrency}`);
         if (uploads.length) await this.client.createDirectory(settings.remoteBasePath);
         const executePlan=async()=>{
-          if (uploads.length) await runBounded(uploads, uploadConcurrency, work => work());
+          // Bounded batches avoid unbounded request queues; each upload keeps its
+          // own precreate/chunk/commit protocol and failure checkpoint.
+          for (let offset=0; offset<uploads.length; offset+=20) {
+            if (this.getSettings().syncPaused || this.interactiveConflictRequests || this.disposed) break;
+            this.setStatus(`批量上传 (${offset}/${uploads.length})，并发 ${uploadConcurrency}`,true);
+            await runBounded(uploads.slice(offset,offset+20), uploadConcurrency, work => work());
+          }
           if (downloads.length) await runBounded(downloads, downloadConcurrency, work => work());
+          for (let offset=0; offset<remoteDeletes.length; offset+=50) {
+            if (this.getSettings().syncPaused || this.interactiveConflictRequests || this.disposed) break;
+            const batch=remoteDeletes.slice(offset,offset+50);
+            this.setStatus(`批量删除：复核 ${offset+1}–${offset+batch.length}/${remoteDeletes.length}`,true);
+            const eligible:typeof batch=[];
+            try {
+              // One fresh listing per parent within this batch, never trust cached inventory.
+              const directories=new Map<string,RemoteFileInfo[]>();
+              for (const item of batch) {
+                if (this.getSettings().syncPaused || this.interactiveConflictRequests || this.disposed) break;
+                const local=await this.inspectLocalFile(item.path);
+                const parent=item.remotePath.slice(0,item.remotePath.lastIndexOf("/"));
+                if (!directories.has(parent)) directories.set(parent,await this.client.listFiles(parent,false));
+                const actual=directories.get(parent)!.find(f=>f.path===item.remotePath && f.isdir===0);
+                const remote:FileStateInspection=actual ? {exists:true,md5:actual.md5,fsId:actual.fsId,size:actual.size,mtime:actual.serverMtime} : {exists:false};
+                const decision=determineSyncAction(local,remote,item.base,true);
+                if (decision.action === "delete_remote") eligible.push(item);
+                else { result.skipped++; this.log("warn",`删除前状态变化，保留并留待下次同步: ${item.path}`); }
+              }
+              // Recheck local existence after network waits, immediately before delete.
+              const ready:typeof batch=[];
+              for (const item of eligible) {
+                if ((await this.inspectLocalFile(item.path)).exists) {result.skipped++;continue;}
+                ready.push(item);
+              }
+              if (this.getSettings().syncPaused || this.interactiveConflictRequests || this.disposed) break;
+              if (ready.length) {
+                const outcomes=await this.client.deleteFiles(ready.map(x=>x.remotePath));
+                for (const item of ready) {
+                  const error=outcomes.has(item.remotePath) ? outcomes.get(item.remotePath) : "删除结果缺失";
+                  if (error) {result.errors.push({path:item.path,error});this.log("error",`批量删除失败: ${item.path}`,error);}
+                  else {this.stateStore.delete(item.path);result.deleted++;this.log("info",`批量删除成功: ${item.path}`);}
+                }
+                await this.stateStore.save();
+              }
+            } catch (error:any) {
+              for (const item of batch) result.errors.push({path:item.path,error:error.message || String(error)});
+              this.log("error","批量删除中断，未确认项目保留基线，下次重新核对",error.message || String(error));
+              break; // Do not repeat a failed network call once for every file.
+            } finally {
+              completedWork+=batch.length;
+              this.setStatus(`批量删除 (${Math.min(offset+batch.length,remoteDeletes.length)}/${remoteDeletes.length})`,true);
+            }
+          }
           for (const work of serial) await work();
         };
         if(settings.incrementalSync && mutationPaths.length) {

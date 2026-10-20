@@ -758,6 +758,26 @@ var BaiduClient = class {
       throw new Error(`Failed to delete remote file "${remotePath}" (errno: ${data.errno})`);
     }
   }
+  /** Synchronous batch request; only explicit per-path acknowledgements commit. */
+  async deleteFiles(paths) {
+    if (!paths.length) return /* @__PURE__ */ new Map();
+    if (paths.length > 50 || new Set(paths).size !== paths.length) throw new Error("\u5220\u9664\u6279\u6B21\u5FC5\u987B\u4E3A 1\u201350 \u4E2A\u4E0D\u540C\u8DEF\u5F84");
+    const token = await this.ensureFreshToken();
+    const res = await (0, import_obsidian2.requestUrl)({
+      url: `https://pan.baidu.com/rest/2.0/xpan/file?method=filemanager&opera=delete&access_token=${token}`,
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ async: "0", filelist: JSON.stringify(paths) }).toString()
+    });
+    const data = res.json;
+    const result = /* @__PURE__ */ new Map();
+    for (const path of paths) {
+      const items = Array.isArray(data.info) ? data.info.filter((x) => x.path === path) : [];
+      const item = items.length === 1 ? items[0] : void 0;
+      result.set(path, item && (item.errno === 0 || item.errno === -9) ? void 0 : `\u5220\u9664\u7ED3\u679C\u672A\u786E\u8BA4 (\u603B errno: ${data.errno}, \u6587\u4EF6 errno: ${item?.errno ?? "missing"})`);
+    }
+    return result;
+  }
   /**
    * Upload file to Baidu Netdisk using 2-phase atomic commit
    * (Precreate -> upload parts -> create commit)
@@ -2535,13 +2555,14 @@ var SyncEngine = class {
         const uploads = [];
         const downloads = [];
         const serial = [];
+        const remoteDeletes = [];
         const mutationPaths = [];
         let completed = 0;
         let completedWork = 0;
         let acceptedIdentical = false;
         for (const path of allPaths) {
           if (this.interactiveConflictRequests) break;
-          const totalPlanned = uploads.length + downloads.length + serial.length;
+          const totalPlanned = uploads.length + downloads.length + serial.length + remoteDeletes.length;
           const currentCount = totalPlanned + completed + 1;
           if (currentCount % 25 === 0 || currentCount === allPaths.size || totalPlanned > 0) {
             this.setStatus(`\u68C0\u67E5\u672C\u5730\u53D8\u66F4 (${currentCount}/${allPaths.size})`, true);
@@ -2565,6 +2586,11 @@ var SyncEngine = class {
               fsId: remoteItem.fsId
             } : { exists: false };
             let decision = determineSyncAction(localInspection, remoteInspection, base, indexed?.incremental === true);
+            if (decision.action === "delete_remote" && base) {
+              remoteDeletes.push({ path, remotePath, base });
+              mutationPaths.push(path);
+              continue;
+            }
             if (decision.action === "noop") {
               acceptedIdentical = this.rememberIdenticalVersion(path, localInspection, remoteInspection, base) || acceptedIdentical;
               completed++;
@@ -2574,7 +2600,7 @@ var SyncEngine = class {
             const work = async () => {
               if (this.getSettings().syncPaused || this.interactiveConflictRequests) return;
               const itemStarted = Date.now();
-              const plannedCount = uploads.length + downloads.length + serial.length;
+              const plannedCount = uploads.length + downloads.length + serial.length + remoteDeletes.length;
               this.currentFiles.add(path);
               this.setStatus(`\u540C\u6B65\u53D8\u66F4 (${completedWork}/${plannedCount})`, true);
               const wasUpload = decision.action === "upload";
@@ -2627,7 +2653,7 @@ var SyncEngine = class {
                 completed++;
                 completedWork++;
                 this.currentFiles.delete(path);
-                const plannedCount2 = uploads.length + downloads.length + serial.length;
+                const plannedCount2 = uploads.length + downloads.length + serial.length + remoteDeletes.length;
                 this.setStatus(`\u540C\u6B65\u53D8\u66F4 (${completedWork}/${plannedCount2})`, true);
               }
               await this.stateStore.save();
@@ -2659,8 +2685,66 @@ var SyncEngine = class {
         if (downloads.length) this.log("info", `\u4E0B\u8F7D\u8BA1\u5212: ${downloads.length} \u4E2A\u6587\u4EF6\uFF0C\u5E76\u53D1 ${downloadConcurrency}`);
         if (uploads.length) await this.client.createDirectory(settings.remoteBasePath);
         const executePlan = async () => {
-          if (uploads.length) await runBounded(uploads, uploadConcurrency, (work) => work());
+          for (let offset = 0; offset < uploads.length; offset += 20) {
+            if (this.getSettings().syncPaused || this.interactiveConflictRequests || this.disposed) break;
+            this.setStatus(`\u6279\u91CF\u4E0A\u4F20 (${offset}/${uploads.length})\uFF0C\u5E76\u53D1 ${uploadConcurrency}`, true);
+            await runBounded(uploads.slice(offset, offset + 20), uploadConcurrency, (work) => work());
+          }
           if (downloads.length) await runBounded(downloads, downloadConcurrency, (work) => work());
+          for (let offset = 0; offset < remoteDeletes.length; offset += 50) {
+            if (this.getSettings().syncPaused || this.interactiveConflictRequests || this.disposed) break;
+            const batch = remoteDeletes.slice(offset, offset + 50);
+            this.setStatus(`\u6279\u91CF\u5220\u9664\uFF1A\u590D\u6838 ${offset + 1}\u2013${offset + batch.length}/${remoteDeletes.length}`, true);
+            const eligible = [];
+            try {
+              const directories = /* @__PURE__ */ new Map();
+              for (const item of batch) {
+                if (this.getSettings().syncPaused || this.interactiveConflictRequests || this.disposed) break;
+                const local = await this.inspectLocalFile(item.path);
+                const parent = item.remotePath.slice(0, item.remotePath.lastIndexOf("/"));
+                if (!directories.has(parent)) directories.set(parent, await this.client.listFiles(parent, false));
+                const actual = directories.get(parent).find((f) => f.path === item.remotePath && f.isdir === 0);
+                const remote = actual ? { exists: true, md5: actual.md5, fsId: actual.fsId, size: actual.size, mtime: actual.serverMtime } : { exists: false };
+                const decision = determineSyncAction(local, remote, item.base, true);
+                if (decision.action === "delete_remote") eligible.push(item);
+                else {
+                  result.skipped++;
+                  this.log("warn", `\u5220\u9664\u524D\u72B6\u6001\u53D8\u5316\uFF0C\u4FDD\u7559\u5E76\u7559\u5F85\u4E0B\u6B21\u540C\u6B65: ${item.path}`);
+                }
+              }
+              const ready = [];
+              for (const item of eligible) {
+                if ((await this.inspectLocalFile(item.path)).exists) {
+                  result.skipped++;
+                  continue;
+                }
+                ready.push(item);
+              }
+              if (this.getSettings().syncPaused || this.interactiveConflictRequests || this.disposed) break;
+              if (ready.length) {
+                const outcomes = await this.client.deleteFiles(ready.map((x) => x.remotePath));
+                for (const item of ready) {
+                  const error = outcomes.has(item.remotePath) ? outcomes.get(item.remotePath) : "\u5220\u9664\u7ED3\u679C\u7F3A\u5931";
+                  if (error) {
+                    result.errors.push({ path: item.path, error });
+                    this.log("error", `\u6279\u91CF\u5220\u9664\u5931\u8D25: ${item.path}`, error);
+                  } else {
+                    this.stateStore.delete(item.path);
+                    result.deleted++;
+                    this.log("info", `\u6279\u91CF\u5220\u9664\u6210\u529F: ${item.path}`);
+                  }
+                }
+                await this.stateStore.save();
+              }
+            } catch (error) {
+              for (const item of batch) result.errors.push({ path: item.path, error: error.message || String(error) });
+              this.log("error", "\u6279\u91CF\u5220\u9664\u4E2D\u65AD\uFF0C\u672A\u786E\u8BA4\u9879\u76EE\u4FDD\u7559\u57FA\u7EBF\uFF0C\u4E0B\u6B21\u91CD\u65B0\u6838\u5BF9", error.message || String(error));
+              break;
+            } finally {
+              completedWork += batch.length;
+              this.setStatus(`\u6279\u91CF\u5220\u9664 (${Math.min(offset + batch.length, remoteDeletes.length)}/${remoteDeletes.length})`, true);
+            }
+          }
           for (const work of serial) await work();
         };
         if (settings.incrementalSync && mutationPaths.length) {
