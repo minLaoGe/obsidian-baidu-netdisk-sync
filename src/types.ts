@@ -73,7 +73,7 @@ export interface PendingConflict {
   path: string;
   remotePath: string;
   copies: string[];
-  remote: { exists: boolean; md5?: string; fsId?: string; mtime?: number };
+  remote: { exists: boolean; md5?: string; fsId?: string; mtime?: number; size?: number };
   createdAt: number;
 }
 

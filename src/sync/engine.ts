@@ -1,3 +1,4 @@
+import { HashCache } from "./hash-cache";
 import { RemoteIndex, INDEX_DIR } from "./remote-index";
 import { hasConflictMarkers, mergeText } from "./merge";
 import { App, Notice, Platform, TAbstractFile, TFile } from "obsidian";
@@ -6,7 +7,7 @@ import { decryptData, encryptData, isEncrypted } from "../crypto/e2ee";
 import { ConflictDecision, determineSyncAction, FileStateInspection, generateConflictPath, sameFileContent, sameFileVersion } from "./conflict";
 import { DebounceManager, FifoQueue, Mutex, runBounded } from "./queue";
 import { SyncStateStore } from "./state";
-import { PendingConflict, ConflictStrategy, PluginSettings, RemoteFileInfo, SyncLogEntry, SyncResult } from "../types";
+import { SyncMetadataEntry, PendingConflict, ConflictStrategy, PluginSettings, RemoteFileInfo, SyncLogEntry, SyncResult } from "../types";
 import { AtomicFileSystem } from "../utils/atomic";
 import { calculateMd5 } from "../utils/crypto";
 import { normalizeVaultPath, toLocalPath, toRemotePath } from "../utils/path";
@@ -15,6 +16,21 @@ export class SyncEngine {
   private atomicFs: AtomicFileSystem;
   private stateStore: SyncStateStore;
   private client: BaiduClient;
+  private hashCaches = new Map<string, HashCache>();
+  private contentCache(): HashCache {
+    const s = this.getSettings();
+    const scope = calculateMd5(new TextEncoder().encode(JSON.stringify([s.remoteBasePath,s.appKey,s.username])));
+    let cache = this.hashCaches.get(scope);
+    if (!cache) { cache = new HashCache(this.app,scope); this.hashCaches.set(scope,cache); }
+    return cache;
+  }
+  private async rememberContent(remote: FileStateInspection, bytes: ArrayBuffer): Promise<void> {
+    // Never map ciphertext identifiers to plaintext or bypass password checks.
+    if (this.getSettings().enableE2EE || isEncrypted(bytes) || bytes.byteLength !== remote.size) return;
+    try { await this.contentCache().remember(remote.md5,remote.size,calculateMd5(bytes)); }
+    catch { this.log("warn","内容哈希缓存保存失败，后续仍使用下载校验"); }
+  }
+
   private syncMutex: Mutex = new Mutex();
   private interactiveConflictRequests=0;
   private batchJournalActive=false;
@@ -482,6 +498,7 @@ export class SyncEngine {
 
         const uploadResult = await this.remoteMutation(localPath,()=>this.client.uploadFile(remotePath, buffer));
 
+        if (!settings.enableE2EE) await this.rememberContent({exists:true,md5:uploadResult.md5,size:buffer.byteLength},buffer);
         this.stateStore.set(localPath, {
           path: localPath,
           localMtime: local.mtime || Date.now(),
@@ -501,6 +518,8 @@ export class SyncEngine {
         }
 
         let data = await this.client.downloadFile(remote.fsId, remote.size);
+
+        await this.rememberContent(remote,data);
 
         // End-to-End Decryption
         if (isEncrypted(data) || settings.enableE2EE) {
@@ -616,7 +635,7 @@ export class SyncEngine {
             localMtime: local.mtime!,
             localSize: local.size,
             localMd5: local.md5,
-            remoteFsId: conflict.remote.fsId,
+            remoteFsId: conflict.remote.fsId!,
             remoteMtime: conflict.remote.mtime || local.mtime!,
             remoteMd5: conflict.remote.md5 || local.md5,
             lastSyncTime: Date.now()
@@ -646,8 +665,25 @@ export class SyncEngine {
     let copyPath: string | undefined;
     if (remote.exists) {
       if (!remote.fsId) throw new Error("冲突缺少远端文件标识");
-      data = await this.client.downloadFile(remote.fsId, remote.size);
       const settings = this.getSettings();
+      const fresh = await this.inspectLocalFile(localPath);
+      let cached = false;
+      if (!settings.enableE2EE && fresh.exists && fresh.md5) {
+        try { cached = await this.contentCache().matches(remote.md5,remote.size,fresh.md5); }
+        catch { /* optional cache never blocks normal verification */ }
+      }
+      if (cached) {
+        const bytes = await this.atomicFs.readBinary(localPath);
+        // Recheck actual bytes after lookup; cached local metadata is insufficient.
+        if (!isEncrypted(bytes) && bytes.byteLength === remote.size && calculateMd5(bytes) === fresh.md5) {
+          data = bytes;
+          this.log("info", `已复用上传或下载验证的哈希映射，跳过重复下载: ${localPath}`);
+        }
+      }
+      if (!data) {
+        data = await this.client.downloadFile(remote.fsId, remote.size);
+        await this.rememberContent(remote,data);
+      }
       if (isEncrypted(data) || settings.enableE2EE) {
         if (!settings.e2eePassword) throw new Error("无法解密远端冲突副本");
         data = await decryptData(data, settings.e2eePassword);

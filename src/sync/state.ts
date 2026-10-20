@@ -69,7 +69,7 @@ export class SyncStateStore {
     entry: Omit<SyncMetadataEntry, "revision"> & { revision?: number }
   ): void {
     const existing = this.data.files[path];
-    const nextRevision = (existing ? existing.revision : 0) + 1;
+    const nextRevision = (existing?.revision ?? 0) + 1;
     
     this.data.files[path] = {
       ...entry,

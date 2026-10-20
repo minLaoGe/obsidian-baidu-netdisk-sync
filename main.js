@@ -1790,6 +1790,54 @@ var AtomicFileSystem = class {
   }
 };
 
+// src/sync/hash-cache.ts
+var HashCache = class {
+  constructor(app, scope) {
+    this.app = app;
+    this.scope = scope;
+    this.entries = {};
+    this.loaded = false;
+    this.queue = Promise.resolve();
+    this.path = `${app.vault.configDir || ".obsidian"}/plugins/baidu-sync/hash-cache-${scope}.json`;
+  }
+  key(hash, size) {
+    if (!hash || !/^[a-z0-9]{32}$/i.test(hash) || !Number.isSafeInteger(size) || size < 0) return;
+    return `${hash.toLowerCase()}:${size}`;
+  }
+  async load() {
+    if (this.loaded) return;
+    try {
+      const e = JSON.parse(await this.app.vault.adapter.read(this.path));
+      if (e.version === 1 && e.scope === this.scope && e.entries && typeof e.entries === "object" && !Array.isArray(e.entries) && e.checksum === calculateMd5(new TextEncoder().encode(JSON.stringify(e.entries)))) {
+        this.entries = Object.fromEntries(Object.entries(e.entries).filter(([k, v]) => /^[a-z0-9]{32}:\d+$/.test(k) && (v === null || typeof v === "string" && /^[a-f0-9]{32}$/.test(v))));
+      }
+    } catch {
+    }
+    this.loaded = true;
+  }
+  async matches(hash, size, plaintext) {
+    await this.queue;
+    await this.load();
+    const key = this.key(hash, size);
+    return !!key && this.entries[key] === plaintext.toLowerCase();
+  }
+  async remember(hash, size, plaintext) {
+    const key = this.key(hash, size);
+    if (!key || !/^[a-f0-9]{32}$/i.test(plaintext)) return;
+    const task = this.queue.catch(() => void 0).then(async () => {
+      await this.load();
+      const value = plaintext.toLowerCase();
+      if (this.entries[key] === value || this.entries[key] === null) return;
+      this.entries[key] = this.entries[key] === void 0 ? value : null;
+      const entries = this.entries;
+      const checksum = calculateMd5(new TextEncoder().encode(JSON.stringify(entries)));
+      await new AtomicFileSystem(this.app).atomicWrite(this.path, JSON.stringify({ version: 1, scope: this.scope, checksum, entries }));
+    });
+    this.queue = task.catch(() => void 0);
+    return task;
+  }
+};
+
 // src/sync/remote-index.ts
 var INDEX_DIR = ".baidu-sync-index-v1";
 var AUDIT_INTERVAL = 24 * 60 * 60 * 1e3;
@@ -2180,7 +2228,7 @@ var SyncStateStore = class {
    */
   set(path, entry) {
     const existing = this.data.files[path];
-    const nextRevision = (existing ? existing.revision : 0) + 1;
+    const nextRevision = (existing?.revision ?? 0) + 1;
     this.data.files[path] = {
       ...entry,
       revision: entry.revision ?? nextRevision
@@ -2232,6 +2280,7 @@ var SyncEngine = class {
   constructor(app, getSettings, client, onStatusChange) {
     this.app = app;
     this.getSettings = getSettings;
+    this.hashCaches = /* @__PURE__ */ new Map();
     this.syncMutex = new Mutex();
     this.interactiveConflictRequests = 0;
     this.batchJournalActive = false;
@@ -2250,6 +2299,24 @@ var SyncEngine = class {
     this.atomicFs = new AtomicFileSystem(app);
     this.stateStore = new SyncStateStore(app);
     this.onStatusChange = onStatusChange;
+  }
+  contentCache() {
+    const s = this.getSettings();
+    const scope = calculateMd5(new TextEncoder().encode(JSON.stringify([s.remoteBasePath, s.appKey, s.username])));
+    let cache = this.hashCaches.get(scope);
+    if (!cache) {
+      cache = new HashCache(this.app, scope);
+      this.hashCaches.set(scope, cache);
+    }
+    return cache;
+  }
+  async rememberContent(remote, bytes) {
+    if (this.getSettings().enableE2EE || isEncrypted(bytes) || bytes.byteLength !== remote.size) return;
+    try {
+      await this.contentCache().remember(remote.md5, remote.size, calculateMd5(bytes));
+    } catch {
+      this.log("warn", "\u5185\u5BB9\u54C8\u5E0C\u7F13\u5B58\u4FDD\u5B58\u5931\u8D25\uFF0C\u540E\u7EED\u4ECD\u4F7F\u7528\u4E0B\u8F7D\u6821\u9A8C");
+    }
   }
   dispose() {
     this.disposed = true;
@@ -2653,6 +2720,7 @@ var SyncEngine = class {
           buffer = await encryptData(buffer, settings.e2eePassword);
         }
         const uploadResult = await this.remoteMutation(localPath, () => this.client.uploadFile(remotePath, buffer));
+        if (!settings.enableE2EE) await this.rememberContent({ exists: true, md5: uploadResult.md5, size: buffer.byteLength }, buffer);
         this.stateStore.set(localPath, {
           path: localPath,
           localMtime: local.mtime || Date.now(),
@@ -2670,6 +2738,7 @@ var SyncEngine = class {
           throw new Error(`\u7F3A\u5C11 fs_id \u65E0\u6CD5\u4E0B\u8F7D: ${remotePath}`);
         }
         let data = await this.client.downloadFile(remote.fsId, remote.size);
+        await this.rememberContent(remote, data);
         if (isEncrypted(data) || settings.enableE2EE) {
           if (!settings.e2eePassword) {
             throw new Error(`\u6587\u4EF6 "${localPath}" \u5904\u4E8E\u52A0\u5BC6\u72B6\u6001\uFF0C\u4F46\u672C\u5730\u672A\u914D\u7F6E\u89E3\u5BC6\u5BC6\u7801\uFF01`);
@@ -2799,8 +2868,26 @@ var SyncEngine = class {
     let copyPath;
     if (remote.exists) {
       if (!remote.fsId) throw new Error("\u51B2\u7A81\u7F3A\u5C11\u8FDC\u7AEF\u6587\u4EF6\u6807\u8BC6");
-      data = await this.client.downloadFile(remote.fsId, remote.size);
       const settings = this.getSettings();
+      const fresh = await this.inspectLocalFile(localPath);
+      let cached = false;
+      if (!settings.enableE2EE && fresh.exists && fresh.md5) {
+        try {
+          cached = await this.contentCache().matches(remote.md5, remote.size, fresh.md5);
+        } catch {
+        }
+      }
+      if (cached) {
+        const bytes = await this.atomicFs.readBinary(localPath);
+        if (!isEncrypted(bytes) && bytes.byteLength === remote.size && calculateMd5(bytes) === fresh.md5) {
+          data = bytes;
+          this.log("info", `\u5DF2\u590D\u7528\u4E0A\u4F20\u6216\u4E0B\u8F7D\u9A8C\u8BC1\u7684\u54C8\u5E0C\u6620\u5C04\uFF0C\u8DF3\u8FC7\u91CD\u590D\u4E0B\u8F7D: ${localPath}`);
+        }
+      }
+      if (!data) {
+        data = await this.client.downloadFile(remote.fsId, remote.size);
+        await this.rememberContent(remote, data);
+      }
       if (isEncrypted(data) || settings.enableE2EE) {
         if (!settings.e2eePassword) throw new Error("\u65E0\u6CD5\u89E3\u5BC6\u8FDC\u7AEF\u51B2\u7A81\u526F\u672C");
         data = await decryptData(data, settings.e2eePassword);

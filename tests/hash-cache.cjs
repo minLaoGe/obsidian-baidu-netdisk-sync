@@ -1,0 +1,61 @@
+const assert=require('node:assert/strict'),esbuild=require('esbuild');
+const files=new Map();let fail=false;
+class Atomic {async atomicWrite(p,s){if(fail)throw Error('disk');files.set(p,s);}}
+(async()=>{
+const built=await esbuild.build({entryPoints:['src/sync/hash-cache.ts'],bundle:true,platform:'node',format:'cjs',write:false,plugins:[{name:'atomic',setup(b){b.onResolve({filter:/utils\/atomic$/},()=>({path:'atomic',namespace:'mock'}));b.onLoad({filter:/.*/,namespace:'mock'},()=>({contents:'module.exports = globalThis.__cacheAtomic;'}));}}]});
+globalThis.__cacheAtomic={AtomicFileSystem:Atomic};const m={exports:{}};new Function('module','exports',built.outputFiles[0].text)(m,m.exports);delete globalThis.__cacheAtomic;const {HashCache}=m.exports;
+ const app={vault:{configDir:'.obsidian',adapter:{read:async p=>{if(!files.has(p))throw Error('missing');return files.get(p);}}}};
+ const hash='c76b789fakc48bef0903087aff8444e7',md5='2d6f4600c6483df8762f890808204d1d';
+ const a=new HashCache(app,'accountA');
+ assert.equal(await a.matches(hash,12,md5),false);
+ await a.remember(hash,12,md5);
+ assert.equal(await a.matches(hash,12,md5),true);
+ assert.equal(await a.matches(hash,13,md5),false);
+ assert.equal(await new HashCache(app,'accountA').matches(hash,12,md5),true);
+ assert.equal(await new HashCache(app,'accountB').matches(hash,12,md5),false);
+ await a.remember(hash,12,'a'.repeat(32));
+ assert.equal(await a.matches(hash,12,md5),false);
+ await a.remember(hash,12,md5);
+ assert.equal(await new HashCache(app,'accountA').matches(hash,12,md5),false);
+ for(const key of files.keys())files.set(key,'corrupt');
+ assert.equal(await new HashCache(app,'accountA').matches(hash,12,md5),false);
+ fail=true;await assert.rejects(a.remember('b'.repeat(32),12,md5));fail=false;
+ await a.remember('d'.repeat(32),12,md5);assert.equal(await a.matches('d'.repeat(32),12,md5),true);
+ const engineBuild=esbuild.buildSync({entryPoints:['src/sync/engine.ts'],bundle:true,platform:'node',format:'cjs',write:false,external:['obsidian']});
+ const em={exports:{}};new Function('require','module','exports',engineBuild.outputFiles[0].text)(id=>id==='obsidian'?{Platform:{isDesktopApp:false},FileSystemAdapter:class{},Notice:class{},TFile:class{}}:require(id),em,em.exports);
+ const bytes=new TextEncoder().encode('verified content').buffer;
+ const cryptoBuild=esbuild.buildSync({entryPoints:['src/utils/crypto.ts'],bundle:true,platform:'node',format:'cjs',write:false});const cm={exports:{}};new Function('module','exports',cryptoBuild.outputFiles[0].text)(cm,cm.exports);
+ const plain=cm.exports.calculateMd5(bytes);let downloads=0,baseline;
+ const settings={enableE2EE:false,remoteBasePath:'/root',appKey:'app',username:'user'};
+ const engine=new em.exports.SyncEngine(app,()=>settings,{downloadFile:async()=>{downloads++;return bytes;}});
+ engine.log=()=>{};engine.inspectLocalFile=async()=>({exists:true,md5:plain,size:bytes.byteLength,mtime:1});
+ engine.atomicFs={readBinary:async()=>bytes};engine.stateStore={getConflicts:()=>[],set:(_p,v)=>baseline=v,save:async()=>{}};
+ engine.contentCache=()=>({matches:async(h,size,md5)=>h===hash&&size===bytes.byteLength&&md5===plain,remember:async()=>{}});
+ await engine.resolveConflict('other-path.md','/root/other-path.md',{action:'conflict'},{exists:true},{exists:true,md5:hash,size:bytes.byteLength,fsId:'123',mtime:1});
+ assert.equal(downloads,0);assert.equal(baseline.localMd5,plain);assert.equal(baseline.remoteMd5,hash);
+ engine.contentCache=()=>({matches:async()=>false,remember:async()=>{}});
+ await engine.resolveConflict('unknown.md','/root/unknown.md',{action:'conflict'},{exists:true},{exists:true,md5:hash,size:bytes.byteLength,fsId:'123',mtime:1});
+ assert.equal(downloads,1);
+ // Old baselines contain no cache fields, and some omit revision/size/conflicts.
+ const stateBuild=await esbuild.build({entryPoints:['src/sync/state.ts'],bundle:true,platform:'node',format:'cjs',write:false,plugins:[{name:'atomic',setup(b){b.onResolve({filter:/utils\/atomic$/},()=>({path:'atomic',namespace:'mock'}));b.onLoad({filter:/.*/,namespace:'mock'},()=>({contents:'module.exports = globalThis.__cacheAtomic;'}));}}]});
+ globalThis.__cacheAtomic={AtomicFileSystem:Atomic};const sm={exports:{}};new Function('module','exports',stateBuild.outputFiles[0].text)(sm,sm.exports);delete globalThis.__cacheAtomic;
+ const oldEntry={path:'old.md',localMtime:1,localMd5:plain,remoteFsId:'123',remoteMtime:1,remoteMd5:hash,lastSyncTime:1};
+ const statePath='.obsidian/plugins/baidu-sync/sync-state.json';
+ files.set(statePath,JSON.stringify({version:1,lastFullSyncTimestamp:1,files:{'old.md':oldEntry}}));
+ app.vault.adapter.exists=async p=>files.has(p);
+ const store=new sm.exports.SyncStateStore(app);await store.load();
+ assert.deepEqual(store.get('old.md'),oldEntry);assert.deepEqual(store.getConflicts(),[]);
+ store.set('old.md',oldEntry);await store.save();
+ const saved=JSON.parse(files.get(statePath));assert.equal(saved.version,1);assert.equal(saved.files['old.md'].revision,1);
+ assert.equal(saved.files['old.md'].remoteMd5,hash);assert.equal(saved.files['old.md'].localMd5,plain);
+ assert.equal('hashCache' in saved,false);
+ const again=new sm.exports.SyncStateStore(app);await again.load();assert.equal(again.get('old.md').revision,1);
+ // Old-version records remain usable without translating opaque hashes to hex.
+ const conflictBuild=esbuild.buildSync({entryPoints:['src/sync/conflict.ts'],bundle:true,platform:'node',format:'cjs',write:false});const dm={exports:{}};new Function('module','exports',conflictBuild.outputFiles[0].text)(dm,dm.exports);
+ assert.equal(dm.exports.determineSyncAction({exists:true,md5:plain},{exists:true,md5:hash},oldEntry).action,'noop');
+ // Cache creation never rewrites a legacy baseline or old remote journal.
+ const before=files.get(statePath);await new HashCache(app,'legacy-scope').remember(hash,bytes.byteLength,plain);assert.equal(files.get(statePath),before);
+ console.log('PASS: legacy v1 baseline without revision/size/conflicts loads and round-trips; unchanged opaque hashes remain noop; cache is separate');
+ console.log('PASS: cross-path verified mapping skips download and records both hashes; unknown mapping downloads normally');
+ console.log('PASS: hash mapping persists, isolates scopes/sizes, poisons conflicting observations, survives corruption and failed persistence');
+})().catch(e=>{console.error(e);process.exitCode=1});
