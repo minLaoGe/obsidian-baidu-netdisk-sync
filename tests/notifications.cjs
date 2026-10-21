@@ -7,7 +7,8 @@ const b=esbuild.buildSync({entryPoints:['src/sync/engine.ts'],bundle:true,platfo
  engine.log=()=>{};engine.stateStore={getAll:()=>({}),getConflicts:()=>[],save:async()=>{},setLastFullSyncTimestamp:()=>{}};
  engine.inspectLocalFile=async()=>({exists:true,md5:'local'});engine.executeAction=async()=>engine.notifyConflict();
  const result=await engine.runFullSync();assert.equal(result.conflicted,25);assert.equal(notices.length,1);assert.match(notices[0],/同步完成/);
- notices.length=0;for(let i=0;i<25;i++)engine.notifyConflict();assert.equal(notices.length,1);
+ notices.length=0;for(let i=0;i<25;i++)engine.notifyConflict();assert.equal(notices.length,0);
  notices.length=0;engine.interactiveConflictRequests=1;engine.notifyConflict();assert.equal(notices.length,0);
- console.log('PASS: 25 conflicts produce one sync summary; local conflict bursts are throttled; batch conflicts stay quiet');
+ notices.length=0;await engine.runFullSync(false,false);assert.equal(notices.length,0);
+ console.log('PASS: 25 conflicts produce one sync summary; background sync and local conflicts stay quiet; batch conflicts stay quiet');
 })().catch(e=>{console.error(e);process.exitCode=1});

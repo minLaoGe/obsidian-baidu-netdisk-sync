@@ -54,9 +54,6 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
     this.addCommand({ id: 'show-baidu-sync-progress', name: '查看百度同步进度', callback: () => this.openSyncProgress() });
     await this.syncEngine.initialize();
     this.updateStatusBar(this.settings.syncPaused ? "已暂停" : "就绪", false);
-    if (this.syncEngine.getPendingConflicts().length) {
-      new Notice(`有 ${this.syncEngine.getPendingConflicts().length} 个同步冲突待人工处理，点击状态栏查看。`,15000);
-    }
     this.addCommand({id:"review-baidu-conflicts",name:"查看并人工解决同步冲突",
       callback:()=>this.openConflictReview()});
 
@@ -115,7 +112,7 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
     if (!(Platform.isMobile && this.settings.mobileManualSync) && !this.settings.syncPaused && this.settings.syncOnStartup && this.settings.accessToken) {
       this.startupSyncTimeoutId = window.setTimeout(() => {
         this.startupSyncTimeoutId = undefined;
-        if (!(Platform.isMobile && this.settings.mobileManualSync) && !this.settings.syncPaused) void this.runSync();
+        if (!(Platform.isMobile && this.settings.mobileManualSync) && !this.settings.syncPaused) void this.runSync(false, false);
       }, 3000); // Wait 3s after startup for vault index to be fully loaded
     }
   }
@@ -164,21 +161,21 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
 
   public openConflictReview() { new ConflictReviewModal(this.app, this.syncEngine).open(); }
 
-  public async runSync(forceFull=false) {
-    if (this.settings.syncPaused) { new Notice("同步已暂停，请先在插件设置中解除暂停。"); return; }
+  public async runSync(forceFull=false, interactive=true) {
+    if (this.settings.syncPaused) { if (interactive) new Notice("同步已暂停，请先在插件设置中解除暂停。"); return; }
     if (!this.settings.accessToken) {
-      new Notice("请先在设置中配置百度网盘 Access Token！");
+      if (interactive) new Notice("请先在设置中配置百度网盘 Access Token！");
       return;
     }
     const now = Date.now();
     if (!forceFull && this.lastSyncCompletedAt && (now - this.lastSyncCompletedAt < 10000)) {
       const remainingSec = Math.ceil((10000 - (now - this.lastSyncCompletedAt)) / 1000);
-      new Notice(`全量同步冷却中（剩余 ${remainingSec} 秒）`);
+      if (interactive) new Notice(`全量同步冷却中（剩余 ${remainingSec} 秒）`);
       return;
     }
-    this.openSyncProgress();
+    if (interactive) this.openSyncProgress();
     if (this.manualSync) return this.manualSync;
-    const task = this.syncEngine.runFullSync(forceFull).then(() => {}); this.manualSync = task;
+    const task = this.syncEngine.runFullSync(forceFull, interactive).then(() => {}); this.manualSync = task;
     try {
       await task;
       this.lastSyncCompletedAt = Date.now();
@@ -205,7 +202,7 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
     if (!(Platform.isMobile && this.settings.mobileManualSync) && !this.settings.syncPaused && this.settings.autoSync && intervalSec >= 10) {
       const intervalMs = intervalSec * 1000;
       this.autoSyncIntervalId = window.setInterval(() => {
-        if (!(Platform.isMobile && this.settings.mobileManualSync) && !this.settings.syncPaused) void this.runSync();
+        if (!(Platform.isMobile && this.settings.mobileManualSync) && !this.settings.syncPaused) void this.runSync(false, false);
       }, intervalMs);
       console.log(`Auto sync scheduled every ${intervalSec} seconds.`);
     }

@@ -8,8 +8,7 @@ export class MobileSyncProgress extends Component {
   private detail?: HTMLElement;
   private bar?: HTMLProgressElement;
   private modal?: Modal;
-  private dismissed = false;
-  private wasBusy = false;
+  private dismissed = true;
   private lastRendered = 0;
   constructor(private plugin: BaiduNetdiskSyncPlugin) { super(); }
   onload() {
@@ -17,16 +16,14 @@ export class MobileSyncProgress extends Component {
     this.register(() => { window.clearInterval(timer); this.modal?.close(); this.card?.remove(); });
   }
   update() {
-    const busy = this.plugin.syncEngine?.getProgress().busy;
-    if (busy && !this.wasBusy) this.dismissed = false;
-    this.wasBusy = !!busy; if (Date.now()-this.lastRendered >= 100) this.render();
+    if (Date.now()-this.lastRendered >= 100) this.render();
   }
   open() {
     this.dismissed = false;
     if (this.modal) { this.render(); return; }
     const modal = new Modal(this.plugin.app); this.modal = modal;
     modal.titleEl.setText('百度同步进度'); modal.modalEl.addClass('baidu-sync-progress-modal');
-    modal.onClose = () => { this.modal = undefined; this.render(); };
+    modal.onClose = () => { this.modal = undefined; this.dismissed = true; this.card?.remove(); this.card = undefined; this.render(); };
     modal.open(); this.render();
   }
   private render() {
@@ -71,7 +68,7 @@ export class MobileSyncProgress extends Component {
       content.createEl('p', {
         text: Platform.isMobile
           ? '⚠️ 提示：同步期间请保持手机在前台亮屏，切勿息屏或切换后台（Android 休眠会切断网络导致 UnknownHostException 错误）。'
-          : '💡 提示：正在与百度网盘进行安全双向同步，保持网络畅通即可。可收起弹窗，浮动卡片将继续展示进度。',
+          : '💡 提示：正在与百度网盘进行安全双向同步，保持网络畅通即可。可关闭弹窗，同步会继续；点击可再次查看进度。',
         cls: 'setting-item-description'
       });
     } else {

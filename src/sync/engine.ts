@@ -42,13 +42,8 @@ export class SyncEngine {
   private automaticSyncBlocked(): boolean {
     return this.disposed || this.getSettings().syncPaused || !!(Platform.isMobile && this.getSettings().mobileManualSync);
   }
-  private lastConflictNoticeAt=0;
   private notifyConflict():void {
-    if(this.isSyncing || this.interactiveConflictRequests>0) return;
-    const now=Date.now();
-    if(now-this.lastConflictNoticeAt<10000) return;
-    this.lastConflictNoticeAt=now;
-    new Notice("百度同步发现待处理冲突，请点击状态栏查看并解决。其他文件继续同步。",10000);
+    // Background conflicts remain visible in status and logs without popups.
   }
   private taskQueue: FifoQueue = new FifoQueue();
   private debounceManager: DebounceManager = new DebounceManager();
@@ -90,7 +85,7 @@ export class SyncEngine {
     await this.stateStore.load();
     if (restored > 0) {
       this.log("warn", `已自动执行崩溃恢复：成功从灾难备份还原了 ${restored} 个笔记文件！`);
-      new Notice(`[BaiduSync] 崩溃恢复：已自动还原 ${restored} 个笔记文件！`);
+      this.log("info", `崩溃恢复：已自动还原 ${restored} 个笔记文件`);
     }
     if (cleaned > 0) {
       this.log("info", `已清理 ${cleaned} 个历史无用临时/备份文件。`);
@@ -235,7 +230,7 @@ export class SyncEngine {
   /**
    * Run full bidirectional synchronization
    */
-  public async runFullSync(forceFull=false): Promise<SyncResult> {
+  public async runFullSync(forceFull=false, interactive=true): Promise<SyncResult> {
     return this.syncMutex.acquire(async () => {
       const result: SyncResult = {
         total: 0,
@@ -251,7 +246,7 @@ export class SyncEngine {
       const settings = this.getSettings();
       if (this.disposed || settings.syncPaused) { this.setStatus("已暂停",false); return result; }
       if (!settings.accessToken) {
-        new Notice("百度网盘同步：请先在设置中填写并授权 Access Token！");
+        if (interactive) new Notice("百度网盘同步：请先在设置中填写并授权 Access Token！");
         return result;
       }
 
@@ -498,7 +493,7 @@ export class SyncEngine {
         const summary = `${this.interactiveConflictRequests ? "同步已让出执行机会给冲突处理，剩余文件下次继续" : "同步完成"}: 跳过${result.skipped} ↑${result.uploaded} ↓${result.downloaded} ⚠${result.conflicted} ✕${result.deleted}${
           result.errors.length ? ` (失败: ${result.errors.length})` : ""
         }`;
-        new Notice(summary+(result.conflicted ? "；冲突请点击状态栏处理" : ""));
+        if (interactive) new Notice(summary+(result.conflicted ? "；冲突请点击状态栏处理" : ""));
         this.log("info", `${summary}；总耗时 ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
       } catch (err: any) {
         if(err.message==="SYNC_YIELD_FOR_CONFLICT") {
@@ -512,7 +507,7 @@ export class SyncEngine {
           ? `网络中断或域名解析失败（手机休眠息屏、代理分流或网络中断）：${rawErr}`
           : rawErr;
         this.log("error", "全量同步过程异常退出", friendlyDetail);
-        new Notice(`百度网盘同步错误: ${friendlyDetail}`, 10000);
+        if (interactive) new Notice(`百度网盘同步错误: ${friendlyDetail}`, 10000);
         this.setStatus("同步出错", false);
       } finally {
         this.isSyncing = false; this.progressFinishedAt = Date.now(); this.currentFiles.clear();
