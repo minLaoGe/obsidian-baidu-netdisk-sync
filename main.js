@@ -1193,7 +1193,7 @@ var BaiduSyncSettingTab = class extends import_obsidian3.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    new import_obsidian3.Setting(containerEl).setName("Baidu Sync Safe \u8BBE\u7F6E").setHeading();
+    new import_obsidian3.Setting(containerEl).setName("\u540C\u6B65\u8BBE\u7F6E").setHeading();
     new import_obsidian3.Setting(containerEl).setName(`\u63D2\u4EF6\u7248\u672C ${this.plugin.manifest.version} \xB7 \u9700\u8981 Obsidian 1.14.4+`).setDesc("Obsidian 1.13 \u7B49\u65E7\u7248\u672C\u53EF\u80FD\u5B89\u88C5\u5230\u65E7\u7248 Baidu Netdisk Sync\u3002\u8BF7\u5148\u5347\u7EA7 Obsidian\uFF0C\u518D\u66F4\u65B0\u63D2\u4EF6\u3002\u65E7\u7248\u540C\u6B65\u62A5 31500 \u65F6\u8BF7\u5148\u5B8C\u6210\u5347\u7EA7\uFF1B\u4EC5\u51ED\u9519\u8BEF\u7801\u65E0\u6CD5\u786E\u5B9A\u539F\u56E0\u3002");
     if (import_obsidian3.Platform.isMobile) {
       new import_obsidian3.Setting(containerEl).setName("\u624B\u673A\u624B\u52A8\u540C\u6B65\u6A21\u5F0F").setDesc("\u5F00\u542F\u65F6\u4EC5\u70B9\u51FB\u7ACB\u5373\u540C\u6B65\u624D\u4F20\u8F93\u6587\u4EF6\uFF0C\u5173\u95ED\u542F\u52A8\u3001\u5B9A\u65F6\u548C\u6587\u4EF6\u53D8\u52A8\u89E6\u53D1\u3002\u540C\u6B65\u65F6\u8BF7\u4FDD\u6301 Obsidian \u4EAE\u5C4F\u5728\u524D\u53F0\uFF0C\u5207\u52FF\u9501\u5C4F\u6216\u5207\u5230\u540E\u53F0\u3002").addToggle((toggle) => toggle.setValue(this.plugin.settings.mobileManualSync).onChange(async (value) => {

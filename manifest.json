@@ -1,7 +1,7 @@
 {
   "id": "baidu-sync",
   "name": "Baidu Sync Safe",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "minAppVersion": "1.14.4",
   "description": "Sync vault files with Baidu Netdisk using recoverable writes and manual mobile synchronization.",
   "author": "minLaoGe",
