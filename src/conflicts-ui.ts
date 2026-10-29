@@ -5,6 +5,8 @@ import { SyncEngine } from "./sync/engine";
 export class ConflictReviewModal extends Modal {
   private selected=new Set<string>();
   private batchBusy=false;
+  private closeTimer?: number;
+  onClose() { if (this.closeTimer !== undefined) window.clearTimeout(this.closeTimer); this.closeTimer = undefined; }
   private selectionBox(setting:Setting, checked:boolean, label:string, change:(value:boolean)=>void):Setting {
     const input=setting.controlEl.createEl("input",{type:"checkbox",attr:{"aria-label":label}});
     input.checked=checked;input.disabled=this.batchBusy;
@@ -115,7 +117,14 @@ export class ConflictReviewModal extends Modal {
       })
       .addButton(b=>b.setButtonText("接受所选远端版本").setDisabled(this.batchBusy).onClick(()=>this.confirmBatch("remote")))
       .addButton(b=>b.setButtonText("接受所选本地版本").setDisabled(this.batchBusy).onClick(()=>this.confirmBatch("local")));
-    if (!conflicts.length) this.contentEl.createEl("p", {text:"暂无待处理冲突。"});
+    if (!conflicts.length) {
+      this.contentEl.createEl("p", {text:"暂无待处理冲突，窗口将在 3 秒后关闭。"});
+      this.onClose();
+      this.closeTimer = window.setTimeout(() => {
+        this.closeTimer = undefined;
+        if (!this.batchBusy && !this.engine.getPendingConflicts().length) this.close();
+      }, 3000);
+    } else this.onClose();
     for (const record of conflicts) {
       this.selectionBox(new Setting(this.contentEl).setName(record.path),this.selected.has(record.path),`选择冲突：${record.path}`,value=>{if(value)this.selected.add(record.path);else this.selected.delete(record.path);this.onOpen();})
         .setDesc(record.remote.exists ? "双方版本已保留，等待人工确认" : "网盘端已删除，本地版本保留，等待人工确认")

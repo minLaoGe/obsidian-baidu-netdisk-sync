@@ -28,6 +28,18 @@ __export(main_exports, {
 });
 module.exports = __toCommonJS(main_exports);
 
+// src/compatibility.ts
+var MIN_APP_VERSION = "1.14.4";
+function supportsAppVersion(version) {
+  const parts = /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(version || "");
+  if (!parts) return false;
+  const actual = parts.slice(1, 4).map(Number), minimum = MIN_APP_VERSION.split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    if (actual[i] !== minimum[i]) return actual[i] > minimum[i];
+  }
+  return true;
+}
+
 // src/progress-ui.ts
 var import_obsidian = require("obsidian");
 var MobileSyncProgress = class extends import_obsidian.Component {
@@ -37,10 +49,28 @@ var MobileSyncProgress = class extends import_obsidian.Component {
     this.dismissed = true;
     this.lastRendered = 0;
   }
+  cancelAutoClose() {
+    if (this.closeTimer !== void 0) window.clearTimeout(this.closeTimer);
+    this.closeTimer = void 0;
+  }
+  scheduleAutoClose(state) {
+    if (!this.modal || state.busy || !state.finishedAt || state.conflicted || state.errors) {
+      this.cancelAutoClose();
+      return;
+    }
+    if (this.closeTimer !== void 0) return;
+    const modal = this.modal, finishedAt = state.finishedAt;
+    this.closeTimer = window.setTimeout(() => {
+      this.closeTimer = void 0;
+      const latest = this.plugin.syncEngine.getProgress();
+      if (this.modal === modal && !latest.busy && latest.finishedAt === finishedAt && !latest.conflicted && !latest.errors) modal.close();
+    }, 3e3);
+  }
   onload() {
     const timer = window.setInterval(() => this.render(), 1e3);
     this.register(() => {
       window.clearInterval(timer);
+      this.cancelAutoClose();
       this.modal?.close();
       this.card?.remove();
     });
@@ -59,6 +89,7 @@ var MobileSyncProgress = class extends import_obsidian.Component {
     modal.titleEl.setText("\u767E\u5EA6\u540C\u6B65\u8FDB\u5EA6");
     modal.modalEl.addClass("baidu-sync-progress-modal");
     modal.onClose = () => {
+      this.cancelAutoClose();
       this.modal = void 0;
       this.dismissed = true;
       this.card?.remove();
@@ -72,11 +103,12 @@ var MobileSyncProgress = class extends import_obsidian.Component {
     const state = this.plugin.syncEngine?.getProgress();
     if (!state) return;
     this.lastRendered = Date.now();
+    this.scheduleAutoClose(state);
     if (!state.startedAt && !this.modal) return;
     const end = state.finishedAt || Date.now();
     const seconds = state.startedAt ? Math.max(0, Math.floor((end - state.startedAt) / 1e3)) : 0;
     const elapsed = `${Math.floor(seconds / 60)}\u5206${seconds % 60}\u79D2`;
-    const phase = state.total > 0 ? `${state.done}/${state.total} \u4E2A\uFF08\u5F53\u524D\u9636\u6BB5\uFF09` : state.busy ? "\u6B63\u5728\u68C0\u67E5\uFF0C\u8BF7\u7A0D\u5019\u2026" : "\u672C\u8F6E\u5DF2\u7ED3\u675F";
+    const phase = state.total > 0 ? `${state.done}/${state.total} \u4E2A\uFF08\u5F53\u524D\u9636\u6BB5\uFF09` : state.busy ? "\u6B63\u5728\u68C0\u67E5\uFF0C\u8BF7\u7A0D\u5019\u2026" : state.finishedAt ? "\u672C\u8F6E\u5DF2\u7ED3\u675F" : "\u7B49\u5F85\u540C\u6B65\u5F00\u59CB\u2026";
     const counts = `\u4E0A\u4F20 ${state.uploaded} \xB7 \u4E0B\u8F7D ${state.downloaded} \xB7 \u8DF3\u8FC7 ${state.skipped} \xB7 \u51B2\u7A81 ${state.conflicted} \xB7 \u5931\u8D25 ${state.errors}`;
     if (!this.card && !this.dismissed) {
       this.card = document.body.createDiv({ cls: "baidu-sync-mobile-progress", attr: { role: "status", "aria-live": "polite" } });
@@ -159,6 +191,23 @@ ${counts}`);
 
 // src/main.ts
 var import_obsidian7 = require("obsidian");
+
+// src/utils/timestamps.ts
+function validTime(value) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 && value <= 864e13 ? value : void 0;
+}
+function remoteTime(value) {
+  if (typeof value !== "number" && typeof value !== "string") return void 0;
+  const seconds = Number(value);
+  return Number.isInteger(seconds) ? validTime(seconds * 1e3) : void 0;
+}
+function writeTimes(times) {
+  const result = {};
+  const mtime = validTime(times?.mtime), ctime = validTime(times?.ctime);
+  if (mtime !== void 0) result.mtime = mtime;
+  if (ctime !== void 0) result.ctime = ctime;
+  return result;
+}
 
 // src/api/baidu-client.ts
 var import_obsidian2 = require("obsidian");
@@ -597,6 +646,8 @@ var BaiduClient = class {
             serverFilename: item.server_filename,
             size: Number(item.size || 0),
             md5: item.md5 ? String(item.md5).toLowerCase() : void 0,
+            localMtime: remoteTime(item.local_mtime),
+            localCtime: remoteTime(item.local_ctime),
             serverMtime: Number(item.server_mtime || 0) * 1e3,
             isdir: Number(item.isdir || 0)
           });
@@ -781,11 +832,13 @@ var BaiduClient = class {
    * Upload file to Baidu Netdisk using 2-phase atomic commit
    * (Precreate -> upload parts -> create commit)
    */
-  async uploadFile(remotePath, fileBuffer) {
+  async uploadFile(remotePath, fileBuffer, times) {
     const token = await this.ensureFreshToken();
     const bytes = fileBuffer instanceof Uint8Array ? fileBuffer : new Uint8Array(fileBuffer);
     const { blockList, chunks } = calculateBlockList(bytes);
     const blockListJson = JSON.stringify(blockList);
+    const clientTimes = {};
+    for (const [name, value] of Object.entries(writeTimes(times))) clientTimes[`local_${name}`] = String(Math.floor(value / 1e3));
     const precreateUrl = `https://pan.baidu.com/rest/2.0/xpan/file?method=precreate&access_token=${token}`;
     const precreateBody = new URLSearchParams({
       path: remotePath,
@@ -794,7 +847,8 @@ var BaiduClient = class {
       autoinit: "1",
       rtype: "3",
       // Overwrite on conflict
-      block_list: blockListJson
+      block_list: blockListJson,
+      ...clientTimes
     });
     const precreateRes = await (0, import_obsidian2.requestUrl)({
       url: precreateUrl,
@@ -835,7 +889,8 @@ var BaiduClient = class {
       isdir: "0",
       rtype: "3",
       uploadid,
-      block_list: blockListJson
+      block_list: blockListJson,
+      ...clientTimes
     });
     const createRes = await (0, import_obsidian2.requestUrl)({
       url: createUrl,
@@ -1138,7 +1193,8 @@ var BaiduSyncSettingTab = class extends import_obsidian3.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    new import_obsidian3.Setting(containerEl).setName("\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u8BBE\u7F6E (Baidu Netdisk Sync)").setHeading();
+    new import_obsidian3.Setting(containerEl).setName("Baidu Sync Safe \u8BBE\u7F6E").setHeading();
+    new import_obsidian3.Setting(containerEl).setName(`\u63D2\u4EF6\u7248\u672C ${this.plugin.manifest.version} \xB7 \u9700\u8981 Obsidian 1.14.4+`).setDesc("Obsidian 1.13 \u7B49\u65E7\u7248\u672C\u53EF\u80FD\u5B89\u88C5\u5230\u65E7\u7248 Baidu Netdisk Sync\u3002\u8BF7\u5148\u5347\u7EA7 Obsidian\uFF0C\u518D\u66F4\u65B0\u63D2\u4EF6\u3002\u65E7\u7248\u540C\u6B65\u62A5 31500 \u65F6\u8BF7\u5148\u5B8C\u6210\u5347\u7EA7\uFF1B\u4EC5\u51ED\u9519\u8BEF\u7801\u65E0\u6CD5\u786E\u5B9A\u539F\u56E0\u3002");
     if (import_obsidian3.Platform.isMobile) {
       new import_obsidian3.Setting(containerEl).setName("\u624B\u673A\u624B\u52A8\u540C\u6B65\u6A21\u5F0F").setDesc("\u5F00\u542F\u65F6\u4EC5\u70B9\u51FB\u7ACB\u5373\u540C\u6B65\u624D\u4F20\u8F93\u6587\u4EF6\uFF0C\u5173\u95ED\u542F\u52A8\u3001\u5B9A\u65F6\u548C\u6587\u4EF6\u53D8\u52A8\u89E6\u53D1\u3002\u540C\u6B65\u65F6\u8BF7\u4FDD\u6301 Obsidian \u4EAE\u5C4F\u5728\u524D\u53F0\uFF0C\u5207\u52FF\u9501\u5C4F\u6216\u5207\u5230\u540E\u53F0\u3002").addToggle((toggle) => toggle.setValue(this.plugin.settings.mobileManualSync).onChange(async (value) => {
         this.plugin.settings.mobileManualSync = value;
@@ -1711,7 +1767,7 @@ var AtomicFileSystem = class {
     const expected = j.oldHash === null ? j.newHash : j.oldHash;
     await this.verify(source, expected);
     await this.ensureDirectoryExists(getParentDir(j.target));
-    await adapter.writeBinary(j.target, await adapter.readBinary(source));
+    await adapter.writeBinary(j.target, await adapter.readBinary(source), writeTimes(await adapter.stat(source) || void 0));
     await this.verify(j.target, expected);
     await this.cleanup(record);
     return true;
@@ -1730,7 +1786,7 @@ var AtomicFileSystem = class {
   async recoverCrashAndCleanStale() {
     return this.exclusive(() => this.recover());
   }
-  async atomicWrite(path, data, expectedMd5) {
+  async atomicWrite(path, data, expectedMd5, times) {
     return this.exclusive(async () => {
       this.validateTarget(path);
       await this.recover();
@@ -1743,11 +1799,14 @@ var AtomicFileSystem = class {
       const id = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
       const stem = `${this.transactionDir}/${id}`;
       const record = stem + ".json";
-      await adapter.writeBinary(stem + ".new", bytes.buffer);
+      await adapter.writeBinary(stem + ".new", bytes.buffer, writeTimes(times));
+      const mtime = writeTimes(times).mtime;
+      const native = this.nativeIO();
+      if (native && mtime !== void 0) await native.fs.utimes(`${native.base}/${stem}.new`, /* @__PURE__ */ new Date(), new Date(mtime));
       await this.verify(stem + ".new", newHash);
       const oldHash = await this.hash(path);
       if (oldHash !== null) {
-        await adapter.writeBinary(stem + ".old", await adapter.readBinary(path));
+        await adapter.writeBinary(stem + ".old", await adapter.readBinary(path), writeTimes(await adapter.stat(path) || void 0));
         await this.verify(stem + ".old", oldHash);
       }
       const journal = { version: 1, target: path, oldHash, newHash };
@@ -1759,9 +1818,9 @@ var AtomicFileSystem = class {
       await this.flush(record);
       if (await this.hash(path) !== oldHash) throw new Error(`File changed before commit: ${path}`);
       try {
-        const native = this.nativeIO();
-        if (native) {
-          await native.fs.rename(`${native.base}/${stem}.new`, `${native.base}/${path}`);
+        const native2 = this.nativeIO();
+        if (native2) {
+          await native2.fs.rename(`${native2.base}/${stem}.new`, `${native2.base}/${path}`);
         } else {
           if (oldHash !== null) await adapter.remove(path);
           await adapter.rename(stem + ".new", path);
@@ -2309,6 +2368,8 @@ var SyncEngine = class {
     this.isSyncing = false;
     this.logs = [];
     this.progressStatus = "\u5C31\u7EEA";
+    this.queuedFullSyncs = 0;
+    this.progressFailed = false;
     this.progressResult = null;
     this.progressStartedAt = 0;
     this.progressFinishedAt = 0;
@@ -2348,9 +2409,12 @@ var SyncEngine = class {
   getProgress() {
     const match = /\((\d+)\/(\d+)\)/.exec(this.progressStatus);
     const result = this.progressResult;
+    const pending = this.getPendingConflicts().length;
+    const busy = this.isSyncing || this.queuedFullSyncs > 0;
+    const status = !busy && !pending && this.progressStatus === "\u90E8\u5206\u6587\u4EF6\u5F85\u4EBA\u5DE5\u89E3\u51B3\u51B2\u7A81" ? "\u5DF2\u540C\u6B65" : this.progressStatus;
     return {
-      status: this.progressStatus,
-      busy: this.isSyncing,
+      status,
+      busy,
       startedAt: this.progressStartedAt,
       finishedAt: this.progressFinishedAt,
       done: match ? Number(match[1]) : 0,
@@ -2358,8 +2422,8 @@ var SyncEngine = class {
       uploaded: result?.uploaded ?? 0,
       downloaded: result?.downloaded ?? 0,
       skipped: result?.skipped ?? 0,
-      conflicted: result?.conflicted ?? 0,
-      errors: result?.errors.length ?? 0,
+      conflicted: pending,
+      errors: result?.errors.length || (this.progressFailed ? 1 : 0),
       files: [...this.currentFiles]
     };
   }
@@ -2491,7 +2555,16 @@ var SyncEngine = class {
    * Run full bidirectional synchronization
    */
   async runFullSync(forceFull = false, interactive = true) {
+    this.queuedFullSyncs++;
+    if (!this.isSyncing) {
+      this.progressFailed = false;
+      this.progressResult = null;
+      this.progressStartedAt = 0;
+      this.progressFinishedAt = 0;
+      this.setStatus("\u7B49\u5F85\u5F00\u59CB\u540C\u6B65\u2026", true);
+    }
     return this.syncMutex.acquire(async () => {
+      this.queuedFullSyncs--;
       const result = {
         total: 0,
         skipped: 0,
@@ -2501,6 +2574,7 @@ var SyncEngine = class {
         deleted: 0,
         errors: []
       };
+      this.progressFailed = false;
       this.progressResult = result;
       this.progressStartedAt = Date.now();
       this.progressFinishedAt = 0;
@@ -2574,6 +2648,8 @@ var SyncEngine = class {
             let remoteInspection = remoteItem ? {
               exists: true,
               mtime: remoteItem.serverMtime,
+              sourceMtime: remoteItem.localMtime,
+              sourceCtime: remoteItem.localCtime,
               md5: remoteItem.md5,
               size: remoteItem.size,
               fsId: remoteItem.fsId
@@ -2697,7 +2773,7 @@ var SyncEngine = class {
                 const parent = item.remotePath.slice(0, item.remotePath.lastIndexOf("/"));
                 if (!directories.has(parent)) directories.set(parent, await this.client.listFiles(parent, false));
                 const actual = directories.get(parent).find((f) => f.path === item.remotePath && f.isdir === 0);
-                const remote = actual ? { exists: true, md5: actual.md5, fsId: actual.fsId, size: actual.size, mtime: actual.serverMtime } : { exists: false };
+                const remote = actual ? { exists: true, md5: actual.md5, fsId: actual.fsId, size: actual.size, mtime: actual.serverMtime, sourceMtime: actual.localMtime, sourceCtime: actual.localCtime } : { exists: false };
                 const decision = determineSyncAction(local, remote, item.base, true);
                 if (decision.action === "delete_remote") eligible.push(item);
                 else {
@@ -2764,6 +2840,7 @@ var SyncEngine = class {
           this.setStatus("\u6B63\u5728\u5904\u7406\u6240\u9009\u51B2\u7A81", true);
           return result;
         }
+        this.progressFailed = true;
         const rawErr = err.message || String(err);
         const isNetworkOrDns = /UnknownHostException|Unable to resolve host|NetworkError|Failed to fetch|timed? ?out/i.test(rawErr);
         const friendlyDetail = isNetworkOrDns ? `\u7F51\u7EDC\u4E2D\u65AD\u6216\u57DF\u540D\u89E3\u6790\u5931\u8D25\uFF08\u624B\u673A\u4F11\u7720\u606F\u5C4F\u3001\u4EE3\u7406\u5206\u6D41\u6216\u7F51\u7EDC\u4E2D\u65AD\uFF09\uFF1A${rawErr}` : rawErr;
@@ -2796,7 +2873,8 @@ var SyncEngine = class {
           }
           buffer = await encryptData(buffer, settings.e2eePassword);
         }
-        const uploadResult = await this.remoteMutation(localPath, () => this.client.uploadFile(remotePath, buffer));
+        const uploadTimes = await this.app.vault.adapter.stat(localPath) || void 0;
+        const uploadResult = await this.remoteMutation(localPath, () => this.client.uploadFile(remotePath, buffer, { mtime: local.mtime, ctime: uploadTimes?.ctime }));
         if (!settings.enableE2EE) await this.rememberContent({ exists: true, md5: uploadResult.md5, size: buffer.byteLength }, buffer);
         this.stateStore.set(localPath, {
           path: localPath,
@@ -2823,7 +2901,7 @@ var SyncEngine = class {
           data = await decryptData(data, settings.e2eePassword);
         }
         const decryptedMd5 = calculateMd5(data);
-        await this.atomicFs.atomicWrite(localPath, data, decryptedMd5);
+        await this.atomicFs.atomicWrite(localPath, data, decryptedMd5, { mtime: remote.sourceMtime || remote.mtime, ctime: remote.sourceCtime });
         const newStat = await this.app.vault.adapter.stat(localPath);
         this.stateStore.set(localPath, {
           path: localPath,
@@ -3280,6 +3358,8 @@ var SyncEngine = class {
       return {
         exists: true,
         mtime: matched.serverMtime,
+        sourceMtime: matched.localMtime,
+        sourceCtime: matched.localCtime,
         size: matched.size,
         md5: matched.md5,
         fsId: matched.fsId
@@ -3297,6 +3377,10 @@ var ConflictReviewModal = class extends import_obsidian6.Modal {
     this.engine = engine;
     this.selected = /* @__PURE__ */ new Set();
     this.batchBusy = false;
+  }
+  onClose() {
+    if (this.closeTimer !== void 0) window.clearTimeout(this.closeTimer);
+    this.closeTimer = void 0;
   }
   selectionBox(setting, checked, label, change) {
     const input = setting.controlEl.createEl("input", { type: "checkbox", attr: { "aria-label": label } });
@@ -3431,7 +3515,14 @@ var ConflictReviewModal = class extends import_obsidian6.Modal {
       if (value) for (const c of conflicts) this.selected.add(c.path);
       this.onOpen();
     }).addButton((b) => b.setButtonText("\u63A5\u53D7\u6240\u9009\u8FDC\u7AEF\u7248\u672C").setDisabled(this.batchBusy).onClick(() => this.confirmBatch("remote"))).addButton((b) => b.setButtonText("\u63A5\u53D7\u6240\u9009\u672C\u5730\u7248\u672C").setDisabled(this.batchBusy).onClick(() => this.confirmBatch("local")));
-    if (!conflicts.length) this.contentEl.createEl("p", { text: "\u6682\u65E0\u5F85\u5904\u7406\u51B2\u7A81\u3002" });
+    if (!conflicts.length) {
+      this.contentEl.createEl("p", { text: "\u6682\u65E0\u5F85\u5904\u7406\u51B2\u7A81\uFF0C\u7A97\u53E3\u5C06\u5728 3 \u79D2\u540E\u5173\u95ED\u3002" });
+      this.onClose();
+      this.closeTimer = window.setTimeout(() => {
+        this.closeTimer = void 0;
+        if (!this.batchBusy && !this.engine.getPendingConflicts().length) this.close();
+      }, 3e3);
+    } else this.onClose();
     for (const record of conflicts) {
       this.selectionBox(new import_obsidian6.Setting(this.contentEl).setName(record.path), this.selected.has(record.path), `\u9009\u62E9\u51B2\u7A81\uFF1A${record.path}`, (value) => {
         if (value) this.selected.add(record.path);
@@ -3477,6 +3568,10 @@ var BaiduNetdiskSyncPlugin = class extends import_obsidian7.Plugin {
     this.lastSyncCompletedAt = 0;
   }
   async onload() {
+    if (!supportsAppVersion(import_obsidian7.apiVersion)) {
+      new import_obsidian7.Notice(`Baidu Sync Safe \u9700\u8981 Obsidian ${MIN_APP_VERSION} \u6216\u4EE5\u4E0A\u7248\u672C\uFF1B\u5F53\u524D ${import_obsidian7.apiVersion || "\u672A\u77E5"}\u3002\u8BF7\u5148\u5347\u7EA7 Obsidian\uFF0C\u518D\u5B89\u88C5\u65B0\u7248\u63D2\u4EF6\u3002\u540C\u6B65\u5C1A\u672A\u542F\u52A8\u3002`, 15e3);
+      return;
+    }
     console.log("Loading Baidu Netdisk Sync Plugin...");
     await this.loadSettings();
     this.baiduClient = new BaiduClient({
@@ -3586,8 +3681,7 @@ var BaiduNetdiskSyncPlugin = class extends import_obsidian7.Plugin {
     this.statusBarItem.onclick = () => {
       if (this.syncEngine.getPendingConflicts().length) this.openConflictReview();
       else {
-        this.openSyncProgress();
-        this.runSync();
+        void this.runSync();
       }
     };
   }
@@ -3606,17 +3700,20 @@ var BaiduNetdiskSyncPlugin = class extends import_obsidian7.Plugin {
       if (interactive) new import_obsidian7.Notice("\u8BF7\u5148\u5728\u8BBE\u7F6E\u4E2D\u914D\u7F6E\u767E\u5EA6\u7F51\u76D8 Access Token\uFF01");
       return;
     }
+    if (this.manualSync) {
+      if (interactive) this.openSyncProgress();
+      return this.manualSync;
+    }
     const now = Date.now();
     if (!forceFull && this.lastSyncCompletedAt && now - this.lastSyncCompletedAt < 1e4) {
       const remainingSec = Math.ceil((1e4 - (now - this.lastSyncCompletedAt)) / 1e3);
       if (interactive) new import_obsidian7.Notice(`\u5168\u91CF\u540C\u6B65\u51B7\u5374\u4E2D\uFF08\u5269\u4F59 ${remainingSec} \u79D2\uFF09`);
       return;
     }
-    if (interactive) this.openSyncProgress();
-    if (this.manualSync) return this.manualSync;
     const task = this.syncEngine.runFullSync(forceFull, interactive).then(() => {
     });
     this.manualSync = task;
+    if (interactive) this.openSyncProgress();
     try {
       await task;
       this.lastSyncCompletedAt = Date.now();

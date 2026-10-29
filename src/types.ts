@@ -50,6 +50,8 @@ export interface RemoteFileInfo {
   serverFilename: string;
   size: number;
   md5?: string;
+  localMtime?: number; // original uploader modification time, milliseconds
+  localCtime?: number; // original uploader creation time, milliseconds
   serverMtime: number; // in milliseconds
   isdir: number; // 1 for dir, 0 for file
 }

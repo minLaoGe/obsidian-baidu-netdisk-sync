@@ -1,5 +1,8 @@
 # Baidu Sync Safe — Obsidian 百度网盘安全双向同步插件
 
+> **安装前请先升级到 Obsidian 1.14.4 或以上。** Obsidian 1.13 等旧客户端可能安装到历史版 **Baidu Netdisk Sync**，并不代表已安装当前 **Baidu Sync Safe 2.0.2**。请先升级 Obsidian，再在社区插件页面更新；安装后到本插件设置顶部核对实际版本。手动安装请覆盖发布包中的 `main.js`、`manifest.json`、`styles.css`，保留 `data.json`、同步状态和备份。旧客户端不再提供历史版本兼容回退；已安装的旧插件不会因此自动升级。
+
+
 <p align="center">
   <img src="https://img.shields.io/badge/Obsidian-v1.14.4+-purple?style=for-the-badge&logo=obsidian&logoColor=white" alt="Obsidian" />
   <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Android%20%7C%20iOS-blue?style=for-the-badge&logo=apple&logoColor=white" alt="Platform" />
@@ -61,7 +64,7 @@ Obsidian 社区拥有非常丰富优秀的同步方案。每个方案都有其�
 ##### 方式 A：从 GitHub Releases 离线安装（推荐）
 1. 访问本项目的 [GitHub Releases 最新发布页面](https://github.com/minLaoGe/obsidian-baidu-netdisk-sync/releases/latest)；
 2. **桌面端（Windows / macOS / Linux）**：下载 `main.js`、`manifest.json`、`styles.css` 三个文件，在你的知识库目录中创建文件夹 `<知识库>/.obsidian/plugins/baidu-sync/`，将这三个文件放入其中；
-3. **安卓端（Android 手机 / 平板）**：下载离线压缩包 `baidu-sync-1.0.9-android.zip`，解压后将 `baidu-sync` 文件夹整体复制到手机知识库路径下的 `.obsidian/plugins/` 目录；
+3. **安卓端（Android 手机 / 平板）**：下载离线压缩包 `baidu-sync-2.0.2-mobile.zip`，解压后将 `baidu-sync` 文件夹整体复制到手机知识库路径下的 `.obsidian/plugins/` 目录；
 4. 打开 Obsidian，进入「设置」→「第三方插件」，关闭安全模式，找到 **Baidu Sync Safe** 并开启启用。
 
 ##### 方式 B：通过 BRAT 插件管理器安装
@@ -213,7 +216,7 @@ The Obsidian community has many wonderful synchronization tools. **Baidu Sync Sa
 ### 📖 Step-by-Step Setup Guide
 
 #### Step 1: Installation
-- **From GitHub Releases**: Download `main.js`, `manifest.json`, and `styles.css` from the [Latest Release](https://github.com/minLaoGe/obsidian-baidu-netdisk-sync/releases/latest) and place them in `<vault>/.obsidian/plugins/baidu-sync/`. On Android, extract `baidu-sync-1.0.9-android.zip` directly into the plugins folder.
+- **From GitHub Releases**: Download `main.js`, `manifest.json`, and `styles.css` from the [Latest Release](https://github.com/minLaoGe/obsidian-baidu-netdisk-sync/releases/latest) and place them in `<vault>/.obsidian/plugins/baidu-sync/`. On Android, extract `baidu-sync-2.0.2-mobile.zip` directly into the plugins folder.
 - **Via BRAT**: Add `minLaoGe/obsidian-baidu-netdisk-sync` in the BRAT community plugin.
 - Enable **Baidu Sync Safe** in Obsidian Community Plugins.
 
@@ -246,3 +249,11 @@ For complete technical specifications, crash-recovery protocols, and automated t
 
 - Inspired by [owl234/obsidian-baidu-netdisk-sync](https://github.com/owl234/obsidian-baidu-netdisk-sync) for end-to-end encryption concepts.
 - Licensed under the [MIT License](LICENSE).
+
+
+### 2.0.2：同步提示与文件时间
+
+- 点击同步立即显示“等待开始同步”，拿到执行机会后显示实际进度；后台任务不会自动打开窗口。
+- 无失败、无待处理冲突时，进度窗口在完成后 3 秒自动关闭；出现失败或剩余冲突时保留窗口。冲突全部处理后，空冲突窗口也会在 3 秒后关闭。进度中的冲突数是当前待处理数，日志保留本轮历史统计。
+- 新上传/重新上传的文件提交 `local_mtime` 和 `local_ctime`；下载优先恢复上传端的修改时间。网盘时间精度为秒，原始毫秒可能被截断。创建时间通过 Obsidian 写入选项尽力保留，受系统和适配器限制，不能保证 Finder/资源管理器的创建日期完全一致。
+- 历史云端文件如果没有保存过客户端时间，只能回退到网盘服务器修改时间。升级不会为了补时间重传所有内容，也无法恢复此前已经丢失的原始时间。

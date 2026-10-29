@@ -1,3 +1,5 @@
+> 当前版本 2.0.2，需要 Obsidian 1.14.4+。请先升级 Obsidian，再安装插件；不要删除 data.json、同步状态或备份。
+
 # 百度同步安卓安装与注意事项（1.0.8）
 
 请参阅 [Android / iOS 手机安装与同步](MOBILE-INSTALL.zh-CN.md)。

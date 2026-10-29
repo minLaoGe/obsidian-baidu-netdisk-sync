@@ -44,7 +44,9 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     // Title
-    new Setting(containerEl).setName("百度网盘同步设置 (Baidu Netdisk Sync)").setHeading();
+    new Setting(containerEl).setName("Baidu Sync Safe 设置").setHeading();
+    new Setting(containerEl).setName(`插件版本 ${this.plugin.manifest.version} · 需要 Obsidian 1.14.4+`)
+      .setDesc("Obsidian 1.13 等旧版本可能安装到旧版 Baidu Netdisk Sync。请先升级 Obsidian，再更新插件。旧版同步报 31500 时请先完成升级；仅凭错误码无法确定原因。");
 
     if (Platform.isMobile) {
       new Setting(containerEl).setName("手机手动同步模式")

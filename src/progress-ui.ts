@@ -10,10 +10,25 @@ export class MobileSyncProgress extends Component {
   private modal?: Modal;
   private dismissed = true;
   private lastRendered = 0;
+  private closeTimer?: number;
+  private cancelAutoClose() {
+    if (this.closeTimer !== undefined) window.clearTimeout(this.closeTimer);
+    this.closeTimer = undefined;
+  }
+  private scheduleAutoClose(state: {busy:boolean; finishedAt:number; conflicted:number; errors:number}) {
+    if (!this.modal || state.busy || !state.finishedAt || state.conflicted || state.errors) { this.cancelAutoClose(); return; }
+    if (this.closeTimer !== undefined) return;
+    const modal = this.modal, finishedAt = state.finishedAt;
+    this.closeTimer = window.setTimeout(() => {
+      this.closeTimer = undefined;
+      const latest = this.plugin.syncEngine.getProgress();
+      if (this.modal === modal && !latest.busy && latest.finishedAt === finishedAt && !latest.conflicted && !latest.errors) modal.close();
+    }, 3000);
+  }
   constructor(private plugin: BaiduNetdiskSyncPlugin) { super(); }
   onload() {
     const timer = window.setInterval(() => this.render(), 1000);
-    this.register(() => { window.clearInterval(timer); this.modal?.close(); this.card?.remove(); });
+    this.register(() => { window.clearInterval(timer); this.cancelAutoClose(); this.modal?.close(); this.card?.remove(); });
   }
   update() {
     if (Date.now()-this.lastRendered >= 100) this.render();
@@ -23,17 +38,18 @@ export class MobileSyncProgress extends Component {
     if (this.modal) { this.render(); return; }
     const modal = new Modal(this.plugin.app); this.modal = modal;
     modal.titleEl.setText('百度同步进度'); modal.modalEl.addClass('baidu-sync-progress-modal');
-    modal.onClose = () => { this.modal = undefined; this.dismissed = true; this.card?.remove(); this.card = undefined; this.render(); };
+    modal.onClose = () => { this.cancelAutoClose(); this.modal = undefined; this.dismissed = true; this.card?.remove(); this.card = undefined; this.render(); };
     modal.open(); this.render();
   }
   private render() {
     const state = this.plugin.syncEngine?.getProgress(); if (!state) return;
     this.lastRendered = Date.now();
+    this.scheduleAutoClose(state);
     if (!state.startedAt && !this.modal) return;
     const end = state.finishedAt || Date.now();
     const seconds = state.startedAt ? Math.max(0,Math.floor((end-state.startedAt)/1000)) : 0;
     const elapsed = `${Math.floor(seconds/60)}分${seconds%60}秒`;
-    const phase = state.total > 0 ? `${state.done}/${state.total} 个（当前阶段）` : state.busy ? '正在检查，请稍候…' : '本轮已结束';
+    const phase = state.total > 0 ? `${state.done}/${state.total} 个（当前阶段）` : state.busy ? '正在检查，请稍候…' : state.finishedAt ? '本轮已结束' : '等待同步开始…';
     const counts = `上传 ${state.uploaded} · 下载 ${state.downloaded} · 跳过 ${state.skipped} · 冲突 ${state.conflicted} · 失败 ${state.errors}`;
     if (!this.card && !this.dismissed) {
       this.card = document.body.createDiv({ cls: 'baidu-sync-mobile-progress', attr: { role: 'status', 'aria-live': 'polite' } });

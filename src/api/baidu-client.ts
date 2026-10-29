@@ -1,3 +1,4 @@
+import { FileTimes, remoteTime, writeTimes } from "../utils/timestamps";
 import { requestUrl, RequestUrlParam, RequestUrlResponse } from "obsidian";
 import { Mutex } from "../sync/queue";
 import { RemoteFileInfo } from "../types";
@@ -209,6 +210,7 @@ export class BaiduClient {
           result.set(item.path, {fsId:String(item.fs_id),path:item.path,
             serverFilename:item.server_filename,size:Number(item.size || 0),
             md5:item.md5 ? String(item.md5).toLowerCase() : undefined,
+            localMtime:remoteTime(item.local_mtime),localCtime:remoteTime(item.local_ctime),
             serverMtime:Number(item.server_mtime || 0)*1000,isdir:Number(item.isdir || 0)});
           if (recursion && Number(item.isdir) === 1 && !visited.has(item.path)) directories.push(item.path);
         }
@@ -429,7 +431,8 @@ export class BaiduClient {
    */
   public async uploadFile(
     remotePath: string,
-    fileBuffer: ArrayBuffer | Uint8Array
+    fileBuffer: ArrayBuffer | Uint8Array,
+    times?: FileTimes
   ): Promise<{ fsId: string; md5: string }> {
     const token = await this.ensureFreshToken();
     const bytes =
@@ -438,6 +441,8 @@ export class BaiduClient {
         : new Uint8Array(fileBuffer);
     const { blockList, chunks } = calculateBlockList(bytes);
     const blockListJson = JSON.stringify(blockList);
+    const clientTimes: Record<string,string> = {};
+    for (const [name,value] of Object.entries(writeTimes(times))) clientTimes[`local_${name}`] = String(Math.floor(value! / 1000));
 
     // Phase 1: Precreate
     const precreateUrl = `https://pan.baidu.com/rest/2.0/xpan/file?method=precreate&access_token=${token}`;
@@ -448,6 +453,7 @@ export class BaiduClient {
       autoinit: "1",
       rtype: "3", // Overwrite on conflict
       block_list: blockListJson,
+      ...clientTimes,
     });
 
     const precreateRes = await requestUrl({
@@ -498,6 +504,7 @@ export class BaiduClient {
       rtype: "3",
       uploadid: uploadid,
       block_list: blockListJson,
+      ...clientTimes,
     });
 
     const createRes = await requestUrl({

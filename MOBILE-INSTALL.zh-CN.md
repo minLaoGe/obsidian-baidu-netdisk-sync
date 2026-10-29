@@ -1,3 +1,5 @@
+> 当前版本 2.0.2，需要 Obsidian 1.14.4+。请先升级 Obsidian，再安装插件；不要删除 data.json、同步状态或备份。
+
 # Android / iOS 手机安装与同步
 
 使用 Obsidian 1.14.4 或以上版本。将 main.js、manifest.json、styles.css 放入手机知识库的 .obsidian/plugins/baidu-sync/，然后在社区插件中启用 Baidu Sync Safe。iOS 可先在电脑准备插件目录，再将文件传入手机知识库；传入后重新加载插件。

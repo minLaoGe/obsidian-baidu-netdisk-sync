@@ -1,0 +1,52 @@
+const assert=require('node:assert/strict'),esbuild=require('esbuild');
+const notices=[],timers=new Map();let timerId=0;
+globalThis.crypto ||= require('node:crypto').webcrypto;
+globalThis.window={setTimeout(fn){timers.set(++timerId,fn);return timerId},clearTimeout(id){timers.delete(id)}};
+const mock={apiVersion:'1.13.0',Platform:{isDesktopApp:false},Plugin:class{},PluginSettingTab:class{},Component:class{},Modal:class{},TFile:class{},FileSystemAdapter:class{},Notice:class{constructor(message){notices.push(message)}}};
+function load(entry){const m={exports:{}};new Function('require','module','exports',esbuild.buildSync({entryPoints:[entry],bundle:true,platform:'node',format:'cjs',write:false,external:['obsidian']}).outputFiles[0].text)(id=>id==='obsidian'?mock:require(id),m,m.exports);return m.exports;}
+(async()=>{
+ const {supportsAppVersion}=load('src/compatibility.ts');
+ const manifest=JSON.parse(require('fs').readFileSync('manifest.json','utf8')),versions=JSON.parse(require('fs').readFileSync('versions.json','utf8'));
+ assert.equal(versions[manifest.version],manifest.minAppVersion);
+ assert(Object.values(versions).every(v=>supportsAppVersion(v)),'No fallback release may advertise support for retired clients');
+ for(const v of ['1.13.0','1.14.0','1.14.3','garbage',''])assert.equal(supportsAppVersion(v),false);
+ for(const v of ['1.14.4','1.14.10','1.15.0','2.0.0'])assert.equal(supportsAppVersion(v),true);
+ const Plugin=load('src/main.ts').default;
+ const plugin=new Plugin();plugin.loadSettings=()=>{throw Error('Old app must stop before loading credentials')};await plugin.onload();assert.match(notices.pop(),/1\.14\.4/);
+ const {SyncEngine}=load('src/sync/engine.ts');
+ const settings={accessToken:'test',remoteBasePath:'/root',ignoredPatterns:[]};
+ const engine=new SyncEngine({vault:{configDir:'.obsidian',adapter:{},getFiles:()=>[]}},()=>settings,{listFiles:async()=>[]});
+ engine.log=()=>{};
+ let conflicts=[{path:'note.md'}];engine.stateStore={getConflicts:()=>conflicts};
+ engine.progressResult={conflicted:25,errors:[]};engine.progressStatus='部分文件待人工解决冲突';assert.equal(engine.getProgress().conflicted,1);conflicts=[];assert.equal(engine.getProgress().conflicted,0);assert.equal(engine.getProgress().status,'已同步');
+ let release;const held=engine.syncMutex.acquire(()=>new Promise(r=>release=r));await Promise.resolve();
+ const task=engine.runFullSync(false,false);assert.equal(engine.getProgress().busy,true);assert.equal(engine.getProgress().finishedAt,0);assert.equal(engine.getProgress().status,'等待开始同步…');engine.disposed=true;release();await held;await task;assert.equal(engine.getProgress().busy,false);
+ const failed=new SyncEngine({vault:{configDir:'.obsidian',adapter:{},getFiles:()=>[]}},()=>settings,{listFiles:async()=>{throw Error('network failure')}});failed.log=()=>{};await failed.runFullSync(false,false);assert.equal(failed.getProgress().errors,1);assert.equal(failed.getProgress().busy,false);
+ const {MobileSyncProgress}=load('src/progress-ui.ts');
+ let state={busy:true,finishedAt:0,conflicted:0,errors:0},closed=0;
+ const ui=new MobileSyncProgress({syncEngine:{getProgress:()=>state}});ui.modal={close(){closed++}};
+ ui.scheduleAutoClose(state);assert.equal(timers.size,0);
+ state={...state,busy:false,finishedAt:100};ui.scheduleAutoClose(state);assert.equal(timers.size,1);const oldCallback=[...timers.values()][0];
+ state={...state,busy:true,finishedAt:0};ui.scheduleAutoClose(state);assert.equal(timers.size,0);oldCallback();assert.equal(closed,0);
+ state={busy:false,finishedAt:200,conflicted:1,errors:0};ui.scheduleAutoClose(state);assert.equal(timers.size,0);
+ state={...state,conflicted:0,errors:1};ui.scheduleAutoClose(state);assert.equal(timers.size,0);
+ state={...state,errors:0};ui.scheduleAutoClose(state);assert.equal(timers.size,1);[...timers.values()][0]();timers.clear();assert.equal(closed,1);
+ // Both upload phases receive client timestamps, in seconds; inventory restores ms.
+ let phases=[];mock.requestUrl=async o=>{const method=new URL(o.url).searchParams.get('method');
+  if(method==='list')return{json:{errno:0,list:[{fs_id:1,path:'/root/note.md',local_mtime:1600000000,local_ctime:'1500000000',server_mtime:1700000000,isdir:0,size:1}]}};
+  if(method==='upload')return{json:{}};
+  const body=new URLSearchParams(o.body);assert.equal(body.get('local_mtime'),'1600000000');assert.equal(body.get('local_ctime'),'1500000000');phases.push(method);
+  return{json:method==='precreate'?{errno:0,return_type:1,uploadid:'s',block_list:[0]}:{errno:0,fs_id:1,size:1}};
+ };
+ const {BaiduClient}=load('src/api/baidu-client.ts');const client=new BaiduClient({appKey:'test',secretKey:'test',accessToken:'test',refreshToken:'',tokenExpiresAt:0});
+ await client.uploadFile('/root/note.md',new Uint8Array([1]),{mtime:1600000000123,ctime:1500000000999});assert.deepEqual(phases,['precreate','create']);
+ const [remote]=await client.listFiles('/root');assert.equal(remote.localMtime,1600000000000);assert.equal(remote.localCtime,1500000000000);assert.equal(remote.serverMtime,1700000000000);
+ // Download passes original times into the atomic writer and records actual written mtime.
+ const data=new Uint8Array([1]);let writeOptions,saved;
+ engine.rememberContent=async()=>{};engine.client={downloadFile:async()=>data};engine.atomicFs={atomicWrite:async(p,b,h,opts)=>{writeOptions=opts}};
+ engine.app.vault.adapter.stat=async()=>({mtime:writeOptions.mtime,size:1});engine.stateStore={set(p,entry){saved=entry}};
+ await engine.executeAction('note.md','/root/note.md',{action:'download'}, {exists:false},{exists:true,fsId:'1',mtime:1700000000000,sourceMtime:1600000000000,sourceCtime:1500000000000});
+ assert.deepEqual(writeOptions,{mtime:1600000000000,ctime:1500000000000});assert.equal(saved.localMtime,1600000000000);assert.equal(saved.remoteMtime,1700000000000);
+ await engine.executeAction('note.md','/root/note.md',{action:'download'}, {exists:false},{exists:true,fsId:'1',mtime:1700000000000});assert.equal(writeOptions.mtime,1700000000000);
+ console.log('PASS: old app blocked, queued progress resets, live conflicts, error retention, safe auto-close, timestamp upload/inventory/download and legacy fallback');
+})().catch(e=>{console.error(e);process.exitCode=1});

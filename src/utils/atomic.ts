@@ -1,3 +1,4 @@
+import { FileTimes, writeTimes } from "./timestamps";
 import { App, FileSystemAdapter, Platform } from "obsidian";
 import { calculateMd5 } from "./crypto";
 import { getParentDir } from "./path";
@@ -108,7 +109,7 @@ export class AtomicFileSystem {
     await this.verify(source, expected);
     await this.ensureDirectoryExists(getParentDir(j.target));
     // Copy rather than move: retain the verified recovery source if this write fails.
-    await adapter.writeBinary(j.target, await adapter.readBinary(source));
+    await adapter.writeBinary(j.target, await adapter.readBinary(source), writeTimes(await adapter.stat(source) || undefined));
     await this.verify(j.target, expected);
     await this.cleanup(record);
     return true;
@@ -131,7 +132,7 @@ export class AtomicFileSystem {
     return this.exclusive(() => this.recover());
   }
 
-  async atomicWrite(path: string, data: ArrayBuffer | Uint8Array | string, expectedMd5?: string): Promise<void> {
+  async atomicWrite(path: string, data: ArrayBuffer | Uint8Array | string, expectedMd5?: string, times?: FileTimes): Promise<void> {
     return this.exclusive(async () => {
       this.validateTarget(path);
       await this.recover(); // unresolved transactions block subsequent writes
@@ -145,11 +146,14 @@ export class AtomicFileSystem {
       const id = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, "0")).join("");
       const stem = `${this.transactionDir}/${id}`;
       const record = stem + ".json";
-      await adapter.writeBinary(stem + ".new", bytes.buffer as ArrayBuffer);
+      await adapter.writeBinary(stem + ".new", bytes.buffer as ArrayBuffer, writeTimes(times));
+      const mtime = writeTimes(times).mtime;
+      const native = this.nativeIO();
+      if (native && mtime !== undefined) await native.fs.utimes(`${native.base}/${stem}.new`, new Date(), new Date(mtime));
       await this.verify(stem + ".new", newHash);
       const oldHash = await this.hash(path);
       if (oldHash !== null) {
-        await adapter.writeBinary(stem + ".old", await adapter.readBinary(path));
+        await adapter.writeBinary(stem + ".old", await adapter.readBinary(path), writeTimes(await adapter.stat(path) || undefined));
         await this.verify(stem + ".old", oldHash);
       }
       const journal: Journal = { version: 1, target: path, oldHash, newHash };

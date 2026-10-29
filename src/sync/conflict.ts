@@ -4,6 +4,8 @@ import { getFileName, getParentDir, joinPaths } from "../utils/path";
 export interface FileStateInspection {
   exists: boolean;
   mtime?: number;
+  sourceMtime?: number;
+  sourceCtime?: number;
   md5?: string;
   size?: number;
   fsId?: string;

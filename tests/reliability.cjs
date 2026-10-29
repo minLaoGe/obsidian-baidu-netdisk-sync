@@ -265,12 +265,13 @@ function ok(value, message) { assert.ok(value, message); checks++; }
     ok(d.files.has(root + '/abc.old'), 'retain backup on ambiguous recovery');
     await assert.rejects(writer.atomicWrite('other.md', 'blocked')); checks++;
   }
-  // Exercise desktop fsync + atomic overwrite on the actual Windows filesystem.
+  // Exercise desktop fsync + atomic overwrite on the actual host filesystem.
   {
     const fs = require('node:fs/promises'), os = require('node:os'), path = require('node:path');
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'baidu-sync-reliability-'));
     class NativeDisk extends mockObsidian.FileSystemAdapter {
       getBasePath() { return root; }
+      async stat(p) { try { const s=await fs.stat(path.join(root,p)); return {type:'file',size:s.size,mtime:s.mtimeMs,ctime:s.birthtimeMs}; } catch(e) { if(e.code==='ENOENT') return null; throw e; } }
       async exists(p) { try { await fs.stat(path.join(root,p)); return true; } catch(e) { if(e.code==='ENOENT') return false; throw e; } }
       async mkdir(p) { await fs.mkdir(path.join(root,p)); }
       async readBinary(p) { const b=await fs.readFile(path.join(root,p)); return b.buffer.slice(b.byteOffset,b.byteOffset+b.byteLength); }
@@ -290,9 +291,12 @@ function ok(value, message) { assert.ok(value, message); checks++; }
       assert.equal(await disk.read('note.md'),'new'); checks++;
       await writer.atomicWrite('note.md','newer');
       assert.equal(await disk.read('note.md'),'newer'); checks++;
+      await writer.atomicWrite('note.md','dated',undefined,{mtime:1600000000000,ctime:1500000000000});
+      assert.ok(Math.abs((await fs.stat(path.join(root,'note.md'))).mtimeMs-1600000000000)<1); checks++;
+      assert.equal(await disk.read('note.md'),'dated'); checks++;
       fs.rename=async(a,b)=>{if(b===root+'/note.md') throw Error('native overwrite unavailable');return originalRename(a,b)};
       await assert.rejects(writer.atomicWrite('note.md','must not replace'));
-      assert.equal(await disk.read('note.md'),'newer'); checks++;
+      assert.equal(await disk.read('note.md'),'dated'); checks++;
     } finally {
       fs.rename=originalRename;
       mockObsidian.Platform.isDesktopApp=false;

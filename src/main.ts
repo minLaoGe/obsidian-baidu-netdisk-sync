@@ -1,5 +1,6 @@
+import { MIN_APP_VERSION, supportsAppVersion } from "./compatibility";
 import { MobileSyncProgress } from './progress-ui';
-import { Notice, Platform, Plugin } from "obsidian";
+import { apiVersion, Notice, Platform, Plugin } from "obsidian";
 import { BaiduClient } from "./api/baidu-client";
 import { BaiduSyncSettingTab, DEFAULT_SETTINGS } from "./settings";
 import { SyncEngine } from "./sync/engine";
@@ -18,6 +19,10 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
   private lastSyncCompletedAt: number = 0;
 
   async onload() {
+    if (!supportsAppVersion(apiVersion)) {
+      new Notice(`Baidu Sync Safe 需要 Obsidian ${MIN_APP_VERSION} 或以上版本；当前 ${apiVersion || "未知"}。请先升级 Obsidian，再安装新版插件。同步尚未启动。`, 15000);
+      return;
+    }
     console.log("Loading Baidu Netdisk Sync Plugin...");
     await this.loadSettings();
 
@@ -151,8 +156,7 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
     this.statusBarItem.onclick = () => {
       if (this.syncEngine.getPendingConflicts().length) this.openConflictReview();
       else {
-        this.openSyncProgress();
-        this.runSync();
+        void this.runSync();
       }
     };
   }
@@ -167,15 +171,15 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
       if (interactive) new Notice("请先在设置中配置百度网盘 Access Token！");
       return;
     }
+    if (this.manualSync) { if (interactive) this.openSyncProgress(); return this.manualSync; }
     const now = Date.now();
     if (!forceFull && this.lastSyncCompletedAt && (now - this.lastSyncCompletedAt < 10000)) {
       const remainingSec = Math.ceil((10000 - (now - this.lastSyncCompletedAt)) / 1000);
       if (interactive) new Notice(`全量同步冷却中（剩余 ${remainingSec} 秒）`);
       return;
     }
-    if (interactive) this.openSyncProgress();
-    if (this.manualSync) return this.manualSync;
     const task = this.syncEngine.runFullSync(forceFull, interactive).then(() => {}); this.manualSync = task;
+    if (interactive) this.openSyncProgress();
     try {
       await task;
       this.lastSyncCompletedAt = Date.now();

@@ -50,6 +50,8 @@ export class SyncEngine {
   private isSyncing: boolean = false;
   private logs: SyncLogEntry[] = [];
   private progressStatus = '就绪';
+  private queuedFullSyncs = 0;
+  private progressFailed = false;
   private progressResult: SyncResult | null = null;
   private progressStartedAt = 0;
   private progressFinishedAt = 0;
@@ -57,10 +59,13 @@ export class SyncEngine {
   public getProgress() {
     const match = /\((\d+)\/(\d+)\)/.exec(this.progressStatus);
     const result = this.progressResult;
-    return { status: this.progressStatus, busy: this.isSyncing, startedAt: this.progressStartedAt, finishedAt: this.progressFinishedAt,
+    const pending = this.getPendingConflicts().length;
+    const busy = this.isSyncing || this.queuedFullSyncs > 0;
+    const status = !busy && !pending && this.progressStatus === "部分文件待人工解决冲突" ? "已同步" : this.progressStatus;
+    return { status, busy, startedAt: this.progressStartedAt, finishedAt: this.progressFinishedAt,
       done: match ? Number(match[1]) : 0, total: match ? Number(match[2]) : 0,
       uploaded: result?.uploaded ?? 0, downloaded: result?.downloaded ?? 0, skipped: result?.skipped ?? 0,
-      conflicted: result?.conflicted ?? 0, errors: result?.errors.length ?? 0, files: [...this.currentFiles] };
+      conflicted: pending, errors: result?.errors.length || (this.progressFailed ? 1 : 0), files: [...this.currentFiles] };
   }
   private onStatusChange?: (statusText: string, isBusy: boolean) => void;
 
@@ -231,7 +236,13 @@ export class SyncEngine {
    * Run full bidirectional synchronization
    */
   public async runFullSync(forceFull=false, interactive=true): Promise<SyncResult> {
+    this.queuedFullSyncs++;
+    if (!this.isSyncing) {
+      this.progressFailed = false; this.progressResult = null; this.progressStartedAt = 0; this.progressFinishedAt = 0;
+      this.setStatus("等待开始同步…", true);
+    }
     return this.syncMutex.acquire(async () => {
+      this.queuedFullSyncs--;
       const result: SyncResult = {
         total: 0,
         skipped: 0,
@@ -242,7 +253,7 @@ export class SyncEngine {
         errors: [],
       };
 
-      this.progressResult = result; this.progressStartedAt = Date.now(); this.progressFinishedAt = 0; this.currentFiles.clear();
+      this.progressFailed = false; this.progressResult = result; this.progressStartedAt = Date.now(); this.progressFinishedAt = 0; this.currentFiles.clear();
       const settings = this.getSettings();
       if (this.disposed || settings.syncPaused) { this.setStatus("已暂停",false); return result; }
       if (!settings.accessToken) {
@@ -318,7 +329,7 @@ export class SyncEngine {
             let localInspection = await this.inspectLocalFile(path, localFile, base);
             const remoteItem = remoteMap.get(path);
             let remoteInspection: FileStateInspection = remoteItem
-              ? { exists: true, mtime: remoteItem.serverMtime, md5: remoteItem.md5,
+              ? { exists: true, mtime: remoteItem.serverMtime, sourceMtime:remoteItem.localMtime, sourceCtime:remoteItem.localCtime, md5: remoteItem.md5,
                   size: remoteItem.size, fsId: remoteItem.fsId }
               : { exists: false };
             let decision = determineSyncAction(localInspection, remoteInspection, base, indexed?.incremental === true);
@@ -444,7 +455,7 @@ export class SyncEngine {
                 const parent=item.remotePath.slice(0,item.remotePath.lastIndexOf("/"));
                 if (!directories.has(parent)) directories.set(parent,await this.client.listFiles(parent,false));
                 const actual=directories.get(parent)!.find(f=>f.path===item.remotePath && f.isdir===0);
-                const remote:FileStateInspection=actual ? {exists:true,md5:actual.md5,fsId:actual.fsId,size:actual.size,mtime:actual.serverMtime} : {exists:false};
+                const remote:FileStateInspection=actual ? {exists:true,md5:actual.md5,fsId:actual.fsId,size:actual.size,mtime:actual.serverMtime,sourceMtime:actual.localMtime,sourceCtime:actual.localCtime} : {exists:false};
                 const decision=determineSyncAction(local,remote,item.base,true);
                 if (decision.action === "delete_remote") eligible.push(item);
                 else { result.skipped++; this.log("warn",`删除前状态变化，保留并留待下次同步: ${item.path}`); }
@@ -501,6 +512,7 @@ export class SyncEngine {
           this.setStatus("正在处理所选冲突",true);
           return result;
         }
+        this.progressFailed = true;
         const rawErr = err.message || String(err);
         const isNetworkOrDns = /UnknownHostException|Unable to resolve host|NetworkError|Failed to fetch|timed? ?out/i.test(rawErr);
         const friendlyDetail = isNetworkOrDns
@@ -547,7 +559,8 @@ export class SyncEngine {
           buffer = await encryptData(buffer, settings.e2eePassword);
         }
 
-        const uploadResult = await this.remoteMutation(localPath,()=>this.client.uploadFile(remotePath, buffer));
+        const uploadTimes = await this.app.vault.adapter.stat(localPath) || undefined;
+        const uploadResult = await this.remoteMutation(localPath,()=>this.client.uploadFile(remotePath, buffer, {mtime:local.mtime, ctime:uploadTimes?.ctime}));
 
         if (!settings.enableE2EE) await this.rememberContent({exists:true,md5:uploadResult.md5,size:buffer.byteLength},buffer);
         this.stateStore.set(localPath, {
@@ -583,7 +596,7 @@ export class SyncEngine {
         const decryptedMd5 = calculateMd5(data);
 
         // Atomic safe write
-        await this.atomicFs.atomicWrite(localPath, data, decryptedMd5);
+        await this.atomicFs.atomicWrite(localPath, data, decryptedMd5, {mtime:remote.sourceMtime || remote.mtime, ctime:remote.sourceCtime});
 
         const newStat = await this.app.vault.adapter.stat(localPath);
         this.stateStore.set(localPath, {
@@ -1046,6 +1059,7 @@ export class SyncEngine {
       return {
         exists: true,
         mtime: matched.serverMtime,
+        sourceMtime: matched.localMtime, sourceCtime: matched.localCtime,
         size: matched.size,
         md5: matched.md5,
         fsId: matched.fsId,
