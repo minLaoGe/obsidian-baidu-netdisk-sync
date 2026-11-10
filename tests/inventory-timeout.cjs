@@ -1,0 +1,3 @@
+const assert=require('node:assert/strict'),esbuild=require('esbuild');
+const m={exports:{}};new Function('require','module','exports',esbuild.buildSync({entryPoints:['src/sync/remote-index.ts'],bundle:true,platform:'node',format:'cjs',write:false,external:['obsidian']}).outputFiles[0].text)(id=>id==='obsidian'?{Platform:{},FileSystemAdapter:class{}}:require(id),m,m.exports);
+(async()=>{assert.equal(await m.exports.boundedInventoryRead(Promise.resolve(42),20),42);await assert.rejects(m.exports.boundedInventoryRead(new Promise(()=>{}),10),/SYNC_REMOTE_TIMEOUT/);console.log('PASS: remote inventory reads return or fail closed on timeout')})().catch(e=>{console.error(e);process.exitCode=1});

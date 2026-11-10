@@ -513,7 +513,7 @@ export class SyncEngine {
           return result;
         }
         this.progressFailed = true;
-        const rawErr = err.message || String(err);
+        const rawErr = err.message === "SYNC_REMOTE_TIMEOUT" ? "检查网盘目录超时，请检查网络后重新点击同步" : err.message || String(err);
         const isNetworkOrDns = /UnknownHostException|Unable to resolve host|NetworkError|Failed to fetch|timed? ?out/i.test(rawErr);
         const friendlyDetail = isNetworkOrDns
           ? `网络中断或域名解析失败（手机休眠息屏、代理分流或网络中断）：${rawErr}`

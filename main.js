@@ -192,6 +192,18 @@ ${counts}`);
 // src/main.ts
 var import_obsidian7 = require("obsidian");
 
+// src/utils/read-timeout.ts
+async function boundedInventoryRead(operation, timeoutMs = 3e4) {
+  let timer;
+  try {
+    return await Promise.race([operation, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("SYNC_REMOTE_TIMEOUT")), timeoutMs);
+    })]);
+  } finally {
+    if (timer !== void 0) clearTimeout(timer);
+  }
+}
+
 // src/utils/timestamps.ts
 function validTime(value) {
   return typeof value === "number" && Number.isFinite(value) && value > 0 && value <= 864e13 ? value : void 0;
@@ -627,7 +639,7 @@ var BaiduClient = class {
       while (true) {
         if (shouldYield?.()) throw new Error("SYNC_YIELD_FOR_CONFLICT");
         const url = `https://pan.baidu.com/rest/2.0/xpan/file?method=list&dir=${encodeURIComponent(directory)}&start=${start}&limit=${limit}&web=1&access_token=${token}`;
-        const data = (await (0, import_obsidian2.requestUrl)({ url, method: "GET" })).json;
+        const data = (await boundedInventoryRead((0, import_obsidian2.requestUrl)({ url, method: "GET" }))).json;
         if (data.errno === -9 && directory === root && start === 0) return [];
         if (data.errno !== 0 || !Array.isArray(data.list)) {
           throw new Error(`\u8FDC\u7AEF\u76EE\u5F55\u679A\u4E3E\u4E0D\u5B8C\u6574\uFF0C\u5DF2\u505C\u6B62\u540C\u6B65: ${directory} (errno: ${data.errno})`);
@@ -1987,14 +1999,17 @@ var RemoteIndex = class {
   }
   async events(list, cache) {
     const events = {};
+    let checked = 0;
     for (const [name, file] of list) {
       this.checkYield();
+      checked++;
+      if (checked === 1 || checked % 25 === 0 || checked === list.size) this.phase?.(`\u68C0\u67E5\u8FDC\u7AEF\u53D8\u66F4\u8BB0\u5F55\uFF08${checked}/${list.size}\uFF09`);
       const previous = cache?.events[name];
       if (previous && previous.fingerprint === fingerprint(file)) {
         events[name] = previous;
         continue;
       }
-      const data = await this.client.downloadFile(file.fsId, file.size);
+      const data = await boundedInventoryRead(this.client.downloadFile(file.fsId, file.size));
       if (data.byteLength > 65536) throw new Error("\u53D8\u66F4\u8BB0\u5F55\u8FC7\u5927");
       const event = validateEvent(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(data)), name);
       events[name] = { fingerprint: fingerprint(file), event };
@@ -2019,6 +2034,7 @@ var RemoteIndex = class {
       events = await this.events(list, cache);
     } catch (e) {
       if (e.message === "SYNC_YIELD_FOR_CONFLICT") throw e;
+      if (e.message === "SYNC_REMOTE_TIMEOUT") throw new Error("\u68C0\u67E5\u8FDC\u7AEF\u53D8\u66F4\u8BB0\u5F55\u8D85\u65F6\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u540E\u91CD\u65B0\u70B9\u51FB\u540C\u6B65");
       this.log("\u589E\u91CF\u7D22\u5F15\u5F02\u5E38\uFF0C\u56DE\u9000\u5B8C\u6574\u76EE\u5F55\u6821\u9A8C\uFF1A" + e.message);
     }
     if (force || !cache || Date.now() - cache.auditedAt >= AUDIT_INTERVAL || !events) {
@@ -2841,7 +2857,7 @@ var SyncEngine = class {
           return result;
         }
         this.progressFailed = true;
-        const rawErr = err.message || String(err);
+        const rawErr = err.message === "SYNC_REMOTE_TIMEOUT" ? "\u68C0\u67E5\u7F51\u76D8\u76EE\u5F55\u8D85\u65F6\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u540E\u91CD\u65B0\u70B9\u51FB\u540C\u6B65" : err.message || String(err);
         const isNetworkOrDns = /UnknownHostException|Unable to resolve host|NetworkError|Failed to fetch|timed? ?out/i.test(rawErr);
         const friendlyDetail = isNetworkOrDns ? `\u7F51\u7EDC\u4E2D\u65AD\u6216\u57DF\u540D\u89E3\u6790\u5931\u8D25\uFF08\u624B\u673A\u4F11\u7720\u606F\u5C4F\u3001\u4EE3\u7406\u5206\u6D41\u6216\u7F51\u7EDC\u4E2D\u65AD\uFF09\uFF1A${rawErr}` : rawErr;
         this.log("error", "\u5168\u91CF\u540C\u6B65\u8FC7\u7A0B\u5F02\u5E38\u9000\u51FA", friendlyDetail);

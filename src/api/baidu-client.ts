@@ -1,3 +1,4 @@
+import { boundedInventoryRead } from "../utils/read-timeout";
 import { FileTimes, remoteTime, writeTimes } from "../utils/timestamps";
 import { requestUrl, RequestUrlParam, RequestUrlResponse } from "obsidian";
 import { Mutex } from "../sync/queue";
@@ -193,7 +194,7 @@ export class BaiduClient {
         if(shouldYield?.()) throw new Error("SYNC_YIELD_FOR_CONFLICT");
         // method=list is single-directory only; recursion=1 is ignored by Baidu.
         const url = `https://pan.baidu.com/rest/2.0/xpan/file?method=list&dir=${encodeURIComponent(directory)}&start=${start}&limit=${limit}&web=1&access_token=${token}`;
-        const data = (await requestUrl({url, method:"GET"})).json;
+        const data = (await boundedInventoryRead(requestUrl({url, method:"GET"}))).json;
         if (data.errno === -9 && directory === root && start === 0) return [];
         if (data.errno !== 0 || !Array.isArray(data.list)) {
           throw new Error(`远端目录枚举不完整，已停止同步: ${directory} (errno: ${data.errno})`);

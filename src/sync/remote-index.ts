@@ -7,6 +7,8 @@ import { normalizeVaultPath, toRemotePath } from "../utils/path";
 
 export const INDEX_DIR = ".baidu-sync-index-v1";
 const AUDIT_INTERVAL = 24 * 60 * 60 * 1000;
+export { boundedInventoryRead } from "../utils/read-timeout";
+import { boundedInventoryRead } from "../utils/read-timeout";
 interface Event { version: 1; id: string; phase: "begin" | "done"; paths: string[]; }
 interface Cache {
   version: 1; scope: string; auditedAt: number;
@@ -77,11 +79,14 @@ export class RemoteIndex {
   }
   private async events(list:Map<string,RemoteFileInfo>,cache?:Cache) {
     const events:Cache["events"]={};
+    let checked=0;
     for(const [name,file] of list) {
       this.checkYield();
+      checked++;
+      if (checked === 1 || checked % 25 === 0 || checked === list.size) this.phase?.(`检查远端变更记录（${checked}/${list.size}）`);
       const previous=cache?.events[name];
       if(previous && previous.fingerprint===fingerprint(file)) {events[name]=previous;continue;}
-      const data=await this.client.downloadFile(file.fsId, file.size);
+      const data=await boundedInventoryRead(this.client.downloadFile(file.fsId, file.size));
       if(data.byteLength>65536) throw new Error("变更记录过大");
       const event=validateEvent(JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(data)),name);
       events[name]={fingerprint:fingerprint(file),event};
@@ -105,6 +110,7 @@ export class RemoteIndex {
       events=await this.events(list,cache);
     } catch(e:any) {
       if(e.message==="SYNC_YIELD_FOR_CONFLICT") throw e;
+      if(e.message==="SYNC_REMOTE_TIMEOUT") throw new Error("检查远端变更记录超时，请检查网络后重新点击同步");
       this.log("增量索引异常，回退完整目录校验："+e.message);
     }
     if(force || !cache || Date.now()-cache.auditedAt>=AUDIT_INTERVAL || !events) {
