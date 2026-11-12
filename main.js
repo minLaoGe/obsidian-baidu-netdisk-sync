@@ -162,7 +162,7 @@ ${counts}`);
     }
     if (state.busy) {
       content.createEl("p", {
-        text: import_obsidian.Platform.isMobile ? "\u26A0\uFE0F \u63D0\u793A\uFF1A\u540C\u6B65\u671F\u95F4\u8BF7\u4FDD\u6301\u624B\u673A\u5728\u524D\u53F0\u4EAE\u5C4F\uFF0C\u5207\u52FF\u606F\u5C4F\u6216\u5207\u6362\u540E\u53F0\uFF08Android \u4F11\u7720\u4F1A\u5207\u65AD\u7F51\u7EDC\u5BFC\u81F4 UnknownHostException \u9519\u8BEF\uFF09\u3002" : "\u{1F4A1} \u63D0\u793A\uFF1A\u6B63\u5728\u4E0E\u767E\u5EA6\u7F51\u76D8\u8FDB\u884C\u5B89\u5168\u53CC\u5411\u540C\u6B65\uFF0C\u4FDD\u6301\u7F51\u7EDC\u7545\u901A\u5373\u53EF\u3002\u53EF\u5173\u95ED\u5F39\u7A97\uFF0C\u540C\u6B65\u4F1A\u7EE7\u7EED\uFF1B\u70B9\u51FB\u53EF\u518D\u6B21\u67E5\u770B\u8FDB\u5EA6\u3002",
+        text: import_obsidian.Platform.isMobile ? "\u{1F4A1} \u63D0\u793A\uFF1A\u9996\u6B21\u6216\u5B8C\u6574\u626B\u63CF\u53EF\u80FD\u8017\u65F6\u8F83\u957F\uFF0C\u8BF7\u4FDD\u6301 Obsidian \u5728\u524D\u53F0\u5E76\u4EAE\u5C4F\u3002\u626B\u63CF\u4E2D\u65AD\u540E\uFF0C\u4E0B\u6B21\u540C\u6B65\u53EF\u80FD\u9700\u8981\u91CD\u65B0\u626B\u63CF\uFF1B\u5DF2\u6210\u529F\u4E0B\u8F7D\u7684\u6587\u4EF6\u4F1A\u4FDD\u7559\u3002" : "\u{1F4A1} \u63D0\u793A\uFF1A\u9996\u6B21\u6216\u5B8C\u6574\u626B\u63CF\u4E2D\u65AD\u540E\uFF0C\u4E0B\u6B21\u540C\u6B65\u53EF\u80FD\u9700\u8981\u91CD\u65B0\u626B\u63CF\uFF1B\u5DF2\u6210\u529F\u4E0B\u8F7D\u7684\u6587\u4EF6\u4F1A\u4FDD\u7559\u3002\u5173\u95ED\u6B64\u7A97\u53E3\u4E0D\u4F1A\u505C\u6B62\u540C\u6B65\u3002",
         cls: "setting-item-description"
       });
     } else {
@@ -688,14 +688,31 @@ var BaiduClient = class {
     }
     return data.list[0].dlink;
   }
+  /** Fetch links for up to 100 file IDs. Missing entries are left for callers
+   * to retry individually; never associate a link by response order. */
+  async getDownloadLinks(fsIds) {
+    const ids = [...new Set(fsIds)];
+    if (!ids.length) return /* @__PURE__ */ new Map();
+    if (ids.length > 100 || ids.some((id) => !/^\d+$/.test(id))) throw new Error("\u65E0\u6548\u7684\u6279\u91CF\u6587\u4EF6\u6807\u8BC6");
+    const token = await this.ensureFreshToken();
+    const url = `https://pan.baidu.com/rest/2.0/xpan/multimedia?method=filemetas&fsids=[${ids.join(",")}]&dlink=1&access_token=${token}`;
+    const data = (await (0, import_obsidian2.requestUrl)({ url, method: "GET" })).json;
+    if (data.errno !== 0 || !Array.isArray(data.list)) throw new Error(`\u6279\u91CF\u83B7\u53D6\u4E0B\u8F7D\u94FE\u63A5\u5931\u8D25 (errno: ${data?.errno})`);
+    const wanted = new Set(ids), links = /* @__PURE__ */ new Map();
+    for (const item of data.list) {
+      const id = String(item.fs_id ?? item.fsId ?? "");
+      if (wanted.has(id) && typeof item.dlink === "string" && item.dlink) links.set(id, item.dlink);
+    }
+    return links;
+  }
   /**
    * Download file content as ArrayBuffer with proper User-Agent.
    * On mobile (and for large files), requests are safely chunked using HTTP Range
    * to avoid Capacitor's bridge Base64 OutOfMemoryError in Android ART.
    */
-  async downloadFile(fsId, expectedSize, onProgress) {
+  async downloadFile(fsId, expectedSize, onProgress, prefetchedLink) {
     const token = await this.ensureFreshToken();
-    const dlink = await this.getDownloadLink(fsId);
+    const dlink = prefetchedLink || await this.getDownloadLink(fsId);
     const downloadUrl = dlink.includes("?") ? `${dlink}&access_token=${token}` : `${dlink}?access_token=${token}`;
     const CHUNK_SIZE = 4 * 1024 * 1024;
     if (expectedSize !== void 0 && expectedSize <= CHUNK_SIZE) {
@@ -706,6 +723,7 @@ var BaiduClient = class {
           "User-Agent": "pan.baidu.com"
         }
       });
+      onProgress?.(res.arrayBuffer.byteLength, expectedSize);
       return res.arrayBuffer;
     }
     const firstEnd = expectedSize !== void 0 ? Math.min(CHUNK_SIZE - 1, expectedSize - 1) : CHUNK_SIZE - 1;
@@ -718,6 +736,7 @@ var BaiduClient = class {
       }
     });
     if (firstRes.status === 200) {
+      onProgress?.(firstRes.arrayBuffer.byteLength, expectedSize ?? firstRes.arrayBuffer.byteLength);
       return firstRes.arrayBuffer;
     }
     if (firstRes.status !== 206) {
@@ -737,10 +756,12 @@ var BaiduClient = class {
         method: "GET",
         headers: { "User-Agent": "pan.baidu.com" }
       });
+      onProgress?.(fallbackRes.arrayBuffer.byteLength, fallbackRes.arrayBuffer.byteLength);
       return fallbackRes.arrayBuffer;
     }
     const firstBytes = new Uint8Array(firstRes.arrayBuffer);
     if (firstBytes.byteLength === totalSize) {
+      onProgress?.(firstBytes.byteLength, totalSize);
       return firstRes.arrayBuffer;
     }
     const result = new Uint8Array(totalSize);
@@ -1213,7 +1234,7 @@ var BaiduSyncSettingTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
         this.plugin.resetAutoSyncTimer();
       }));
-      new import_obsidian3.Setting(containerEl).setName("\u624B\u673A\u540C\u6B65").setDesc("\u63D0\u793A\uFF1A\u9996\u6B21\u6216\u5168\u91CF\u540C\u6B65\u8017\u65F6\u8F83\u957F\uFF0C\u8BF7\u4FDD\u6301\u624B\u673A\u4EAE\u5C4F\u505C\u7559\u5728\u5F53\u524D\u9875\u9762\u3002\u82E5\u63D0\u793A UnknownHostException \u8BF7\u68C0\u67E5\u7F51\u7EDC\u6216\u5173\u95ED\u4EE3\u7406/\u4E13\u7528DNS\u3002").addButton((button) => button.setButtonText("\u7ACB\u5373\u540C\u6B65").setCta().onClick(async () => {
+      new import_obsidian3.Setting(containerEl).setName("\u624B\u673A\u540C\u6B65").setDesc("\u63D0\u793A\uFF1A\u9996\u6B21\u6216\u5B8C\u6574\u626B\u63CF\u53EF\u80FD\u8017\u65F6\u8F83\u957F\uFF0C\u8BF7\u4FDD\u6301 Obsidian \u5728\u524D\u53F0\u5E76\u4EAE\u5C4F\u3002\u626B\u63CF\u4E2D\u65AD\u540E\uFF0C\u4E0B\u6B21\u540C\u6B65\u53EF\u80FD\u9700\u8981\u91CD\u65B0\u626B\u63CF\uFF1B\u5DF2\u6210\u529F\u4E0B\u8F7D\u7684\u6587\u4EF6\u4F1A\u4FDD\u7559\u3002").addButton((button) => button.setButtonText("\u7ACB\u5373\u540C\u6B65").setCta().onClick(async () => {
         await this.plugin.runSync();
       })).addButton((button) => button.setButtonText("\u67E5\u770B\u8FDB\u5EA6").onClick(() => this.plugin.openSyncProgress())).addButton((button) => button.setButtonText("\u67E5\u770B\u51B2\u7A81").onClick(() => this.plugin.openConflictReview()));
     }
@@ -1930,13 +1951,17 @@ var HashCache = class {
 
 // src/sync/remote-index.ts
 var INDEX_DIR = ".baidu-sync-index-v1";
+var NEXT_INDEX_DIR = INDEX_DIR + "/v2";
+var SNAPSHOT_DIR = INDEX_DIR + "/snapshots";
+var SNAPSHOT_LIMIT = 20 * 1024 * 1024;
 var AUDIT_INTERVAL = 24 * 60 * 60 * 1e3;
 function validPath(path) {
-  return typeof path === "string" && path.length > 0 && path.length <= 4096 && !/[\\\x00-\x1f]/.test(path) && normalizeVaultPath(path) === path && path.split("/").every((p) => p !== "." && p !== "..") && path !== INDEX_DIR && !path.startsWith(INDEX_DIR + "/");
+  return typeof path === "string" && path.length > 0 && path.length <= 4096 && !/[\\\x00-\x1f]/.test(path) && normalizeVaultPath(path) === path && path.split("/").every((p) => p !== "." && p !== "..") && path !== INDEX_DIR && !path.startsWith(INDEX_DIR + "/") && path !== NEXT_INDEX_DIR && !path.startsWith(NEXT_INDEX_DIR + "/");
 }
 function validateEvent(value, name) {
-  const match = /^([a-f0-9]{32})\.(begin|done)\.json$/.exec(name);
-  if (!match || value?.version !== 1 || value.id !== match[1] || value.phase !== match[2] || !Array.isArray(value.paths) || !value.paths.length || value.paths.length > 200 || !value.paths.every(validPath)) throw new Error("\u53D8\u66F4\u8BB0\u5F55\u683C\u5F0F\u65E0\u6548");
+  const v2 = name.startsWith("v2/");
+  const match = /^([a-f0-9]{32})\.(begin|done)\.json$/.exec(v2 ? name.slice(3) : name);
+  if (!match || value?.version !== 1 || value.id !== match[1] || value.phase !== match[2] || !Array.isArray(value.paths) || !value.paths.length || value.paths.length > (v2 ? 1e4 : 200) || !value.paths.every(validPath)) throw new Error("\u53D8\u66F4\u8BB0\u5F55\u683C\u5F0F\u65E0\u6548");
   return { version: 1, id: value.id, phase: value.phase, paths: value.paths };
 }
 function fingerprint(file) {
@@ -1956,9 +1981,8 @@ var RemoteIndex = class {
   checkYield() {
     if (this.shouldYield()) throw new Error("SYNC_YIELD_FOR_CONFLICT");
   }
-  async load() {
+  validateCache(envelope) {
     try {
-      const envelope = JSON.parse(await this.app.vault.adapter.read(this.cachePath));
       const d = envelope.data;
       if (!d || envelope.checksum !== calculateMd5(new TextEncoder().encode(JSON.stringify(d)).buffer)) return;
       if (d.version !== 1 || d.scope !== this.scope || !Number.isFinite(d.auditedAt) || d.auditedAt > Date.now() || !Array.isArray(d.files) || !d.events || typeof d.events !== "object" || Array.isArray(d.events)) return;
@@ -1968,6 +1992,7 @@ var RemoteIndex = class {
         if (typeof f.path !== "string" || !f.path.startsWith(prefix) || !validPath(f.path.slice(prefix.length)) || paths.has(f.path) || f.isdir !== 0 || typeof f.fsId !== "string" || !Number.isFinite(f.size) || !Number.isFinite(f.serverMtime)) return;
         paths.add(f.path);
       }
+      if (d.historical !== void 0 && (!d.historical || typeof d.historical !== "object" || Array.isArray(d.historical) || Object.entries(d.historical).some(([name, value]) => !/^(?:v2\/)?[a-f0-9]{32}\.(?:begin|done)\.json$/.test(name) || typeof value !== "string"))) return;
       for (const [name, item] of Object.entries(d.events)) {
         if (typeof item.fingerprint !== "string") return;
         validateEvent(item.event, name);
@@ -1976,6 +2001,54 @@ var RemoteIndex = class {
     } catch {
       return;
     }
+  }
+  async load() {
+    try {
+      return this.validateCache(JSON.parse(await this.app.vault.adapter.read(this.cachePath)));
+    } catch {
+      return;
+    }
+  }
+  async snapshotDeviceId() {
+    const path = `${this.app.vault.configDir || ".obsidian"}/plugins/baidu-sync/snapshot-device-id`;
+    try {
+      const id2 = (await this.app.vault.adapter.read(path)).trim();
+      if (/^[a-f0-9]{32}$/.test(id2)) return id2;
+    } catch {
+    }
+    const id = Array.from(globalThis.crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
+    await new AtomicFileSystem(this.app).atomicWrite(path, id);
+    return id;
+  }
+  async publishSnapshot(cache) {
+    const data = JSON.stringify({ checksum: calculateMd5(new TextEncoder().encode(JSON.stringify(cache)).buffer), data: cache });
+    const bytes = new TextEncoder().encode(data);
+    if (bytes.byteLength > SNAPSHOT_LIMIT) {
+      this.log("\u4E91\u7AEF\u5FEB\u7167\u8FC7\u5927\uFF0C\u8DF3\u8FC7\u4E0A\u4F20");
+      return;
+    }
+    const dir = toRemotePath(this.root, SNAPSHOT_DIR);
+    await this.client.createDirectory(this.root);
+    await this.client.createDirectory(toRemotePath(this.root, INDEX_DIR));
+    await this.client.createDirectory(dir);
+    await this.client.uploadFile(dir + "/" + await this.snapshotDeviceId() + ".json", bytes.buffer);
+  }
+  async loadSnapshot() {
+    const dir = toRemotePath(this.root, SNAPSHOT_DIR);
+    const files = (await this.client.listFiles(dir, false, this.shouldYield)).filter((f) => f.isdir === 0 && f.path.startsWith(dir + "/") && /^[a-f0-9]{32}\.json$/.test(f.path.slice(dir.length + 1)) && f.size > 0 && f.size <= SNAPSHOT_LIMIT);
+    files.sort((a, b) => b.serverMtime - a.serverMtime);
+    for (const file of files.slice(0, 5)) {
+      this.checkYield();
+      try {
+        const raw = await boundedInventoryRead(this.client.downloadFile(file.fsId, file.size));
+        if (raw.byteLength !== file.size || raw.byteLength > SNAPSHOT_LIMIT) continue;
+        const cache = this.validateCache(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw)));
+        if (cache && Date.now() - cache.auditedAt < AUDIT_INTERVAL) return cache;
+      } catch (e) {
+        if (e.message === "SYNC_YIELD_FOR_CONFLICT") throw e;
+      }
+    }
+    return;
   }
   async save(cache) {
     const checksum = calculateMd5(new TextEncoder().encode(JSON.stringify(cache)).buffer);
@@ -1990,48 +2063,113 @@ var RemoteIndex = class {
     const base = toRemotePath(this.root, INDEX_DIR);
     const list = await this.client.listFiles(base, false, this.shouldYield);
     const map = /* @__PURE__ */ new Map();
+    let hasV2 = false;
     for (const f of list) {
       const name = f.path.slice(base.length + 1);
+      if (f.isdir && f.path === toRemotePath(this.root, NEXT_INDEX_DIR)) {
+        hasV2 = true;
+        continue;
+      }
+      if (f.isdir && f.path === toRemotePath(this.root, SNAPSHOT_DIR)) continue;
       if (f.isdir || !f.path.startsWith(base + "/") || !/^[a-f0-9]{32}\.(begin|done)\.json$/.test(name) || f.size > 65536) throw new Error("\u53D8\u66F4\u76EE\u5F55\u5305\u542B\u65E0\u6548\u8BB0\u5F55");
       map.set(name, f);
+    }
+    if (hasV2) {
+      const nested = toRemotePath(this.root, NEXT_INDEX_DIR);
+      for (const f of await this.client.listFiles(nested, false, this.shouldYield)) {
+        const name = f.path.slice(nested.length + 1);
+        if (f.isdir || !f.path.startsWith(nested + "/") || !/^[a-f0-9]{32}\.(begin|done)\.json$/.test(name) || f.size > 1048576) throw new Error("\u6279\u91CF\u53D8\u66F4\u76EE\u5F55\u5305\u542B\u65E0\u6548\u8BB0\u5F55");
+        map.set("v2/" + name, f);
+      }
     }
     return map;
   }
   async events(list, cache) {
     const events = {};
-    let checked = 0;
-    for (const [name, file] of list) {
-      this.checkYield();
-      checked++;
-      if (checked === 1 || checked % 25 === 0 || checked === list.size) this.phase?.(`\u68C0\u67E5\u8FDC\u7AEF\u53D8\u66F4\u8BB0\u5F55\uFF08${checked}/${list.size}\uFF09`);
-      const previous = cache?.events[name];
-      if (previous && previous.fingerprint === fingerprint(file)) {
-        events[name] = previous;
-        continue;
+    const records = [...list.entries()];
+    const results = new Array(records.length);
+    let next = 0, checked = 0, failed = false;
+    const worker = async () => {
+      while (!failed) {
+        try {
+          this.checkYield();
+        } catch (error) {
+          failed = true;
+          throw error;
+        }
+        const index = next++;
+        if (index >= records.length) return;
+        const [name, file] = records[index];
+        try {
+          const previous = cache?.events[name];
+          if (previous && previous.fingerprint === fingerprint(file)) results[index] = previous;
+          else {
+            const data = await boundedInventoryRead(this.client.downloadFile(file.fsId, file.size));
+            if (data.byteLength > (name.startsWith("v2/") ? 1048576 : 65536)) throw new Error("\u53D8\u66F4\u8BB0\u5F55\u8FC7\u5927");
+            const event = validateEvent(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(data)), name);
+            results[index] = { fingerprint: fingerprint(file), event };
+          }
+          if (failed) return;
+          checked++;
+          if (checked === 1 || checked % 25 === 0 || checked === records.length) this.phase?.(`\u68C0\u67E5\u8FDC\u7AEF\u53D8\u66F4\u8BB0\u5F55\uFF08${checked}/${records.length}\uFF09`);
+        } catch (error) {
+          failed = true;
+          throw error;
+        }
       }
-      const data = await boundedInventoryRead(this.client.downloadFile(file.fsId, file.size));
-      if (data.byteLength > 65536) throw new Error("\u53D8\u66F4\u8BB0\u5F55\u8FC7\u5927");
-      const event = validateEvent(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(data)), name);
-      events[name] = { fingerprint: fingerprint(file), event };
-    }
-    for (const { event } of Object.values(events)) {
+    };
+    const settled = await Promise.allSettled(Array.from({ length: Math.min(4, records.length) }, () => worker()));
+    const failure = settled.find((result) => result.status === "rejected");
+    if (failure) throw failure.reason;
+    this.checkYield();
+    for (let i = 0; i < records.length; i++) events[records[i][0]] = results[i];
+    for (const [name, { event }] of Object.entries(events)) {
       if (event.phase === "done") {
-        const begin = events[event.id + ".begin.json"]?.event;
+        const begin = events[(name.startsWith("v2/") ? "v2/" : "") + event.id + ".begin.json"]?.event;
         if (!begin || JSON.stringify(begin.paths) !== JSON.stringify(event.paths)) throw new Error("\u53D8\u66F4\u63D0\u4EA4\u7F3A\u5C11\u6709\u6548\u8D77\u59CB\u8BB0\u5F55");
       }
     }
     return events;
   }
-  async inventory(force = false) {
-    const cache = await this.load();
+  async inventory(force = false, allowSnapshot = true) {
+    let cache = await this.load();
+    let snapshotUsed = false;
+    if (!cache && !force && allowSnapshot) {
+      try {
+        cache = await this.loadSnapshot();
+        if (cache) {
+          snapshotUsed = true;
+          this.log("\u5DF2\u8BFB\u53D6\u4E91\u7AEF\u7D22\u5F15\u5FEB\u7167\uFF0C\u6B63\u5728\u68C0\u67E5\u540E\u7EED\u53D8\u66F4");
+        }
+      } catch (e) {
+        if (e.message === "SYNC_YIELD_FOR_CONFLICT") throw e;
+        this.log("\u4E91\u7AEF\u5FEB\u7167\u4E0D\u53EF\u7528\uFF0C\u6267\u884C\u5B8C\u6574\u6821\u9A8C");
+      }
+    }
     let list, events;
+    let historical = { ...cache?.historical };
     try {
       list = await this.journal();
+      if (!cache) {
+        for (const [name, file] of list) {
+          if (!name.endsWith(".begin.json")) continue;
+          const done = name.slice(0, -"begin.json".length) + "done.json";
+          const completion = list.get(done);
+          if (completion) {
+            historical[name] = fingerprint(file);
+            historical[done] = fingerprint(completion);
+          }
+        }
+      } else if (Object.entries(historical).some(([name, value]) => !list.has(name) || fingerprint(list.get(name)) !== value)) {
+        historical = {};
+        force = true;
+        this.log("\u5386\u53F2\u8BB0\u5F55\u53D1\u751F\u53D8\u5316\uFF0C\u91CD\u65B0\u5B8C\u6574\u6821\u9A8C");
+      }
       if (cache && Object.entries(cache.events).some(([name, item]) => !list.has(name) || fingerprint(list.get(name)) !== item.fingerprint)) {
         force = true;
         this.log("\u5386\u53F2\u53D8\u66F4\u8BB0\u5F55\u88AB\u5220\u9664\u6216\u4FEE\u6539\uFF0C\u91CD\u65B0\u5B8C\u6574\u6821\u9A8C\u540E\u91CD\u5EFA\u6E38\u6807");
       }
-      events = await this.events(list, cache);
+      events = await this.events(new Map([...list].filter(([name]) => !(name in historical))), cache);
     } catch (e) {
       if (e.message === "SYNC_YIELD_FOR_CONFLICT") throw e;
       if (e.message === "SYNC_REMOTE_TIMEOUT") throw new Error("\u68C0\u67E5\u8FDC\u7AEF\u53D8\u66F4\u8BB0\u5F55\u8D85\u65F6\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u540E\u91CD\u65B0\u70B9\u51FB\u540C\u6B65");
@@ -2041,13 +2179,21 @@ var RemoteIndex = class {
       this.checkYield();
       this.log("\u6267\u884C\u5B8C\u6574\u76EE\u5F55\u6821\u9A8C\uFF0C\u5EFA\u7ACB\u672C\u673A\u540C\u6B65\u7D22\u5F15");
       this.phase?.("\u5B8C\u6574\u6821\u9A8C\u76EE\u5F55\uFF0C\u5EFA\u7ACB\u540C\u6B65\u7D22\u5F15...");
-      const files2 = (await this.client.listFiles(this.root, true, this.shouldYield)).filter((f) => f.isdir === 0 && !f.path.startsWith(toRemotePath(this.root, INDEX_DIR) + "/"));
-      if (events) await this.save({ version: 1, scope: this.scope, auditedAt: Date.now(), files: files2, events });
+      const files2 = (await this.client.listFiles(this.root, true, this.shouldYield)).filter((f) => f.isdir === 0 && !f.path.startsWith(toRemotePath(this.root, INDEX_DIR) + "/") && !f.path.startsWith(toRemotePath(this.root, NEXT_INDEX_DIR) + "/"));
+      if (events) {
+        const snapshot = { version: 1, scope: this.scope, auditedAt: Date.now(), files: files2, events, historical };
+        await this.save(snapshot);
+        try {
+          await this.publishSnapshot(snapshot);
+        } catch {
+          this.log("\u4E91\u7AEF\u7D22\u5F15\u5FEB\u7167\u4E0A\u4F20\u5931\u8D25\uFF0C\u672C\u673A\u7D22\u5F15\u4ECD\u53EF\u4F7F\u7528");
+        }
+      }
       return { files: files2, incremental: false, changed: files2.length };
     }
     const changed = /* @__PURE__ */ new Set();
     for (const [name, item] of Object.entries(events)) {
-      if (!cache.events[name] || item.event.phase === "begin" && !events[item.event.id + ".done.json"]) for (const path of item.event.paths) changed.add(path);
+      if (!cache.events[name] || item.event.phase === "begin" && !events[(name.startsWith("v2/") ? "v2/" : "") + item.event.id + ".done.json"]) for (const path of item.event.paths) changed.add(path);
     }
     this.phase?.(`\u68C0\u67E5\u8FDC\u7AEF\u53D8\u66F4\uFF08${changed.size} \u4E2A\u8DEF\u5F84\uFF09`);
     const files = new Map(cache.files.map((f) => [f.path, f]));
@@ -2061,8 +2207,8 @@ var RemoteIndex = class {
       else files.delete(absolute);
     }
     const result = [...files.values()];
-    await this.save({ ...cache, files: result, events });
-    return { files: result, incremental: true, changed: changed.size };
+    await this.save({ ...cache, files: result, events, historical });
+    return { files: result, incremental: !snapshotUsed, changed: changed.size, fromSnapshot: snapshotUsed };
   }
   async mutate(path, operation) {
     return this.mutateMany([path], operation);
@@ -2073,14 +2219,18 @@ var RemoteIndex = class {
     const groups = [];
     for (const path of [...new Set(paths)]) {
       let group = groups[groups.length - 1];
-      if (!group || group.paths.length >= 200 || JSON.stringify([...group.paths, path]).length > 12e3) {
-        group = { id: Array.from(globalThis.crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join(""), paths: [] };
+      const pathBytes = new TextEncoder().encode(JSON.stringify(path)).byteLength + 1;
+      if (!group || group.paths.length >= 1e4 || group.bytes + pathBytes > 999e3) {
+        group = { id: Array.from(globalThis.crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join(""), paths: [], bytes: 2 };
         groups.push(group);
       }
       group.paths.push(path);
+      group.bytes += pathBytes;
     }
-    const dir = toRemotePath(this.root, INDEX_DIR);
+    const legacyDir = toRemotePath(this.root, INDEX_DIR);
+    const dir = toRemotePath(this.root, NEXT_INDEX_DIR);
     await this.client.createDirectory(this.root);
+    await this.client.createDirectory(legacyDir);
     await this.client.createDirectory(dir);
     const publish = async (group, phase) => {
       const event = { version: 1, id: group.id, phase, paths: group.paths };
@@ -2489,7 +2639,7 @@ var SyncEngine = class {
   shouldIgnore(vaultPath) {
     const norm = normalizeVaultPath(vaultPath);
     if (!norm) return true;
-    if (norm === INDEX_DIR || norm.startsWith(INDEX_DIR + "/")) return true;
+    if (norm === INDEX_DIR || norm.startsWith(INDEX_DIR + "/") || norm === NEXT_INDEX_DIR || norm.startsWith(NEXT_INDEX_DIR + "/")) return true;
     if (/\.conflict-\d{8}-\d{6}(?:-[a-z0-9]+)?(?:\.|$)/.test(norm)) return true;
     if (norm.startsWith(".trash/") || norm.startsWith(".git/")) return true;
     const ownDir = `${this.app.vault.configDir || ".obsidian"}/plugins/baidu-sync`;
@@ -2617,9 +2767,9 @@ var SyncEngine = class {
           localMap.set(normalizeVaultPath(file.path), file);
         }
         this.setStatus(settings.incrementalSync ? "\u68C0\u67E5\u8FDC\u7AEF\u53D8\u66F4\u8BB0\u5F55..." : "\u5B8C\u6574\u6821\u9A8C\u7F51\u76D8\u76EE\u5F55...", true);
-        const indexed = settings.incrementalSync ? await this.remoteIndex().inventory(forceFull) : void 0;
+        const indexed = settings.incrementalSync ? await this.remoteIndex().inventory(forceFull, Object.keys(this.stateStore.getAll()).length === 0) : void 0;
         const remoteList = indexed ? indexed.files : await this.client.listFiles(settings.remoteBasePath, true, () => this.interactiveConflictRequests > 0);
-        if (indexed) this.log("info", indexed.incremental ? `\u589E\u91CF\u68C0\u67E5\uFF1A\u8FDC\u7AEF ${indexed.changed} \u4E2A\u53D8\u66F4\u8DEF\u5F84` : "\u5B8C\u6574\u76EE\u5F55\u6821\u9A8C\u5B8C\u6210\uFF0C\u540E\u7EED\u4F7F\u7528\u589E\u91CF\u7D22\u5F15");
+        if (indexed) this.log("info", indexed.fromSnapshot ? `\u4E91\u7AEF\u5FEB\u7167\u68C0\u67E5\u5B8C\u6210\uFF1A\u590D\u6838 ${indexed.changed} \u4E2A\u53D8\u66F4\u8DEF\u5F84` : indexed.incremental ? `\u589E\u91CF\u68C0\u67E5\uFF1A\u8FDC\u7AEF ${indexed.changed} \u4E2A\u53D8\u66F4\u8DEF\u5F84` : "\u5B8C\u6574\u76EE\u5F55\u6821\u9A8C\u5B8C\u6210\uFF0C\u540E\u7EED\u4F7F\u7528\u589E\u91CF\u7D22\u5F15");
         const remoteMap = /* @__PURE__ */ new Map();
         for (const rItem of remoteList) {
           if (rItem.isdir === 1) continue;
@@ -2875,7 +3025,7 @@ var SyncEngine = class {
   /**
    * Execute decided sync action with atomicity, E2EE, and conflict resolution
    */
-  async executeAction(localPath, remotePath, decision, local, remote, base) {
+  async executeAction(localPath, remotePath, decision, local, remote, base, onDownloadProgress) {
     const settings = this.getSettings();
     switch (decision.action) {
       case "noop":
@@ -2908,7 +3058,7 @@ var SyncEngine = class {
         if (!remote.fsId) {
           throw new Error(`\u7F3A\u5C11 fs_id \u65E0\u6CD5\u4E0B\u8F7D: ${remotePath}`);
         }
-        let data = await this.client.downloadFile(remote.fsId, remote.size);
+        let data = await this.client.downloadFile(remote.fsId, remote.size, onDownloadProgress);
         await this.rememberContent(remote, data);
         if (isEncrypted(data) || settings.enableE2EE) {
           if (!settings.e2eePassword) {
@@ -3232,7 +3382,44 @@ var SyncEngine = class {
     try {
       const resolved = [], failed = [];
       progress?.(0, selected.length, "");
+      const groups = /* @__PURE__ */ new Map();
+      if (side === "remote") for (const path of selected) {
+        const record = this.getPendingConflicts().find((c) => c.path === path);
+        if (!record?.remote.exists || !record.remote.fsId || !record.remote.md5 || !Number.isSafeInteger(record.remote.size) || record.remote.size < 0 || record.remote.size > 4 * 1024 * 1024) continue;
+        const parent = record.remotePath.slice(0, record.remotePath.lastIndexOf("/"));
+        const group = groups.get(parent) || [];
+        group.push(path);
+        groups.set(parent, group);
+      }
+      const grouped = /* @__PURE__ */ new Set();
+      for (const [parent, paths2] of groups) {
+        if (paths2.length < 2) continue;
+        let batchLinks = /* @__PURE__ */ new Map();
+        for (let offset = 0; offset < paths2.length; offset += Math.min(8, 100 - offset % 100)) {
+          const batch = paths2.slice(offset, offset + Math.min(8, 100 - offset % 100));
+          if (batch.length < 2) continue;
+          const blockStart = Math.floor(offset / 100) * 100;
+          if (offset === blockStart) {
+            const records = paths2.slice(blockStart, blockStart + 100).map((path) => this.getPendingConflicts().find((c) => c.path === path));
+            const ids = records.map((record) => record?.remote.fsId).filter((id) => !!id && /^\d+$/.test(id));
+            try {
+              batchLinks = await this.client.getDownloadLinks(ids);
+            } catch {
+              batchLinks = /* @__PURE__ */ new Map();
+              this.log("warn", "\u6279\u91CF\u83B7\u53D6\u4E0B\u8F7D\u94FE\u63A5\u5931\u8D25\uFF0C\u6539\u4E3A\u9010\u4E2A\u83B7\u53D6");
+            }
+          }
+          const outcome = await this.acceptRemoteBatch(parent, batch, (path, download) => progress?.(resolved.length + failed.length, selected.length, path, download), batchLinks);
+          for (const item of outcome) {
+            grouped.add(item.path);
+            if (item.error) failed.push({ path: item.path, message: item.error });
+            else resolved.push(item.path);
+            progress?.(resolved.length + failed.length, selected.length, item.path);
+          }
+        }
+      }
       for (const path of selected) {
+        if (grouped.has(path)) continue;
         try {
           await this.syncMutex.acquire(async () => {
             if (this.getSettings().syncPaused) throw new Error("\u540C\u6B65\u5DF2\u6682\u505C");
@@ -3257,8 +3444,14 @@ var SyncEngine = class {
               await this.stateStore.save();
               await this.atomicFs.atomicWrite(backup, bytes, calculateMd5(bytes));
             }
-            if (remote.exists) await this.executeAction(path, record.remotePath, { action: "download", reason: "User accepted remote", isConflict: false }, local, remote);
-            else {
+            if (remote.exists) {
+              const started = Date.now();
+              progress?.(resolved.length + failed.length, selected.length, path, { downloaded: 0, totalBytes: remote.size || 0, bytesPerSecond: 0 });
+              await this.executeAction(path, record.remotePath, { action: "download", reason: "User accepted remote", isConflict: false }, local, remote, void 0, (downloaded, totalBytes) => {
+                const seconds = Math.max((Date.now() - started) / 1e3, 1e-3);
+                progress?.(resolved.length + failed.length, selected.length, path, { downloaded, totalBytes, bytesPerSecond: downloaded / seconds });
+              });
+            } else {
               if (local.exists) await this.atomicFs.safeDelete(path);
               this.stateStore.delete(path);
             }
@@ -3282,6 +3475,91 @@ var SyncEngine = class {
     } finally {
       this.interactiveConflictRequests--;
     }
+  }
+  /** Stage small files in bounded groups; re-list the directory after all downloads
+   * and never apply an entry whose remote or local state changed. */
+  async acceptRemoteBatch(parent, paths, report, links = /* @__PURE__ */ new Map()) {
+    return this.syncMutex.acquire(async () => {
+      const outcome = /* @__PURE__ */ new Map();
+      const staged = [];
+      try {
+        if (this.getSettings().syncPaused) throw new Error("\u540C\u6B65\u5DF2\u6682\u505C");
+        const first = await this.client.listFiles(parent, false);
+        for (const path of paths) {
+          try {
+            if (this.getSettings().syncPaused) throw new Error("\u540C\u6B65\u5DF2\u6682\u505C");
+            const record = this.getPendingConflicts().find((c) => c.path === path);
+            if (!record || !record.remote.exists) throw new Error("\u51B2\u7A81\u8BB0\u5F55\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u68C0\u67E5");
+            const remote = first.find((f) => f.path === record.remotePath && f.isdir === 0);
+            if (!remote || !remote.md5 || !remote.fsId || remote.fsId !== record.remote.fsId || remote.md5 !== record.remote.md5 || remote.size !== record.remote.size) throw new Error("\u8FDC\u7AEF\u7248\u672C\u5DF2\u53D8\u5316\uFF0C\u8BF7\u5237\u65B0\u51B2\u7A81\u540E\u91CD\u8BD5");
+            const local = await this.inspectLocalFile(path);
+            const start = Date.now();
+            report(path, { downloaded: 0, totalBytes: remote.size, bytesPerSecond: 0 });
+            const onProgress = (downloaded, totalBytes) => report(path, { downloaded, totalBytes, bytesPerSecond: downloaded / Math.max((Date.now() - start) / 1e3, 1e-3) });
+            const link = links.get(remote.fsId);
+            let data;
+            try {
+              data = await this.client.downloadFile(remote.fsId, remote.size, onProgress, link);
+            } catch (error) {
+              if (!link) throw error;
+              data = await this.client.downloadFile(remote.fsId, remote.size, onProgress);
+            }
+            if (data.byteLength !== remote.size) throw new Error("\u4E0B\u8F7D\u5927\u5C0F\u4E0D\u4E00\u81F4\uFF0C\u4FDD\u7559\u51B2\u7A81");
+            if (isEncrypted(data) || this.getSettings().enableE2EE) {
+              const password = this.getSettings().e2eePassword;
+              if (!password) throw new Error("\u65E0\u6CD5\u89E3\u5BC6\u8FDC\u7AEF\u6587\u4EF6");
+              data = await decryptData(data, password);
+            }
+            staged.push({ path, record, remote, local, data });
+          } catch (e) {
+            outcome.set(path, e.message || String(e));
+          }
+        }
+        if (staged.length) {
+          const latest = await this.client.listFiles(parent, false);
+          for (const item of staged) {
+            try {
+              if (this.getSettings().syncPaused) throw new Error("\u540C\u6B65\u5DF2\u6682\u505C");
+              const currentRecord = this.getPendingConflicts().find((c) => c.path === item.path);
+              if (!currentRecord || JSON.stringify(currentRecord) !== JSON.stringify(item.record)) throw new Error("\u51B2\u7A81\u8BB0\u5F55\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u68C0\u67E5");
+              const remote = latest.find((f) => f.path === item.record.remotePath && f.isdir === 0);
+              if (!remote || remote.fsId !== item.remote.fsId || remote.md5 !== item.remote.md5 || remote.size !== item.remote.size) throw new Error("\u4E0B\u8F7D\u671F\u95F4\u8FDC\u7AEF\u5DF2\u53D8\u5316\uFF0C\u8BF7\u5237\u65B0\u51B2\u7A81\u540E\u91CD\u8BD5");
+              const local = await this.inspectLocalFile(item.path);
+              if (local.exists !== item.local.exists || local.exists && (!local.md5 || local.md5 !== item.local.md5)) throw new Error("\u4E0B\u8F7D\u671F\u95F4\u672C\u5730\u6587\u4EF6\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u68C0\u67E5");
+              if (local.exists) {
+                const bytes = await this.atomicFs.readBinary(item.path);
+                if (calculateMd5(bytes) !== local.md5) throw new Error("\u672C\u5730\u6587\u4EF6\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u68C0\u67E5");
+                let backup = generateConflictPath(item.path);
+                while (await this.app.vault.adapter.exists(backup)) backup = generateConflictPath(item.path);
+                this.stateStore.setConflict({ ...currentRecord, copies: [...currentRecord.copies, backup] });
+                await this.stateStore.save();
+                await this.atomicFs.atomicWrite(backup, bytes, calculateMd5(bytes));
+              }
+              const latestLocal = await this.inspectLocalFile(item.path);
+              if (latestLocal.exists !== local.exists || local.exists && latestLocal.md5 !== local.md5) throw new Error("\u672C\u5730\u6587\u4EF6\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u68C0\u67E5");
+              const md5 = calculateMd5(item.data);
+              await this.atomicFs.atomicWrite(item.path, item.data, md5, { mtime: remote.localMtime || remote.serverMtime, ctime: remote.localCtime });
+              const stat = await this.app.vault.adapter.stat(item.path);
+              this.stateStore.set(item.path, { path: item.path, localMtime: stat?.mtime || Date.now(), localSize: stat?.size ?? item.data.byteLength, localMd5: md5, remoteFsId: remote.fsId, remoteMtime: remote.serverMtime, remoteMd5: remote.md5, lastSyncTime: Date.now() });
+              const pending = this.getPendingConflicts().find((c) => c.path === item.path);
+              this.stateStore.clearConflict(item.path);
+              try {
+                await this.stateStore.save();
+              } catch (e) {
+                this.stateStore.setConflict(pending);
+                throw e;
+              }
+              outcome.set(item.path, void 0);
+            } catch (e) {
+              outcome.set(item.path, e.message || String(e));
+            }
+          }
+        }
+      } catch (e) {
+        for (const path of paths) if (!outcome.has(path)) outcome.set(path, e.message || String(e));
+      }
+      return paths.map((path) => ({ path, error: outcome.get(path) }));
+    });
   }
   async confirmConflictResolved(path) {
     return this.syncMutex.acquire(() => this.commitConflictResolution(path));
@@ -3387,6 +3665,15 @@ var SyncEngine = class {
 
 // src/conflicts-ui.ts
 var import_obsidian6 = require("obsidian");
+function formatBytes(bytes) {
+  const units = ["B", "KB", "MB", "GB"];
+  let value = Math.max(0, bytes), unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value.toFixed(unit ? 1 : 0)} ${units[unit]}`;
+}
 var ConflictReviewModal = class extends import_obsidian6.Modal {
   constructor(app, engine) {
     super(app);
@@ -3480,7 +3767,14 @@ var ConflictReviewModal = class extends import_obsidian6.Modal {
       this.batchBusy = true;
       status.setText("\u7B49\u5F85\u6B63\u5728\u4F20\u8F93\u7684\u6587\u4EF6\u5B89\u5168\u5B8C\u6210\uFF0C\u7136\u540E\u4F18\u5148\u5904\u7406\u6240\u9009\u51B2\u7A81\u2026\u5173\u95ED\u7A97\u53E3\u4E0D\u4F1A\u53D6\u6D88\u6B63\u5728\u8FDB\u884C\u7684\u63D0\u4EA4\u3002");
       try {
-        const result = await this.engine.acceptConflictVersions(paths, side, (done, total, path) => {
+        const result = await this.engine.acceptConflictVersions(paths, side, (done, total, path, download) => {
+          if (download) {
+            const amount = download.totalBytes ? `${formatBytes(download.downloaded)} / ${formatBytes(download.totalBytes)}` : formatBytes(download.downloaded);
+            const speed = download.downloaded ? `\uFF0C\u5E73\u5747 ${formatBytes(download.bytesPerSecond)}/s` : "\uFF0C\u7B49\u5F85\u4E0B\u8F7D\u54CD\u5E94";
+            status.setText(`\u5DF2\u5904\u7406 ${done}/${total}\uFF0C\u6B63\u5728\u4E0B\u8F7D\uFF1A${path}\uFF08${amount}${speed}\uFF09`);
+            b.setButtonText(`\u5904\u7406\u4E2D ${done}/${total}`);
+            return;
+          }
           status.setText(done === 0 ? `\u7B49\u5F85\u540C\u6B65\u8BA9\u51FA\u6267\u884C\u673A\u4F1A\uFF080/${total}\uFF09\u2026` : `\u5DF2\u5904\u7406 ${done}/${total}\uFF1A${path}`);
           b.setButtonText(`\u5904\u7406\u4E2D ${done}/${total}`);
         });

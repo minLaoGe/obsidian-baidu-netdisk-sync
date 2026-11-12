@@ -56,7 +56,7 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings(); this.plugin.resetAutoSyncTimer();
         }));
       new Setting(containerEl).setName("手机同步")
-        .setDesc("提示：首次或全量同步耗时较长，请保持手机亮屏停留在当前页面。若提示 UnknownHostException 请检查网络或关闭代理/专用DNS。")
+        .setDesc("提示：首次或完整扫描可能耗时较长，请保持 Obsidian 在前台并亮屏。扫描中断后，下次同步可能需要重新扫描；已成功下载的文件会保留。")
         .addButton(button => button.setButtonText("立即同步").setCta().onClick(async () => { await this.plugin.runSync(); }))
         .addButton(button => button.setButtonText("查看进度").onClick(() => this.plugin.openSyncProgress()))
         .addButton(button => button.setButtonText("查看冲突").onClick(() => this.plugin.openConflictReview()));

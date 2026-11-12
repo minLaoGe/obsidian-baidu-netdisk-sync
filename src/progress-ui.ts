@@ -83,8 +83,8 @@ export class MobileSyncProgress extends Component {
     if (state.busy) {
       content.createEl('p', {
         text: Platform.isMobile
-          ? '⚠️ 提示：同步期间请保持手机在前台亮屏，切勿息屏或切换后台（Android 休眠会切断网络导致 UnknownHostException 错误）。'
-          : '💡 提示：正在与百度网盘进行安全双向同步，保持网络畅通即可。可关闭弹窗，同步会继续；点击可再次查看进度。',
+          ? '💡 提示：首次或完整扫描可能耗时较长，请保持 Obsidian 在前台并亮屏。扫描中断后，下次同步可能需要重新扫描；已成功下载的文件会保留。'
+          : '💡 提示：首次或完整扫描中断后，下次同步可能需要重新扫描；已成功下载的文件会保留。关闭此窗口不会停止同步。',
         cls: 'setting-item-description'
       });
     } else {

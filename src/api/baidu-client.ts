@@ -244,6 +244,24 @@ export class BaiduClient {
     return data.list[0].dlink;
   }
 
+  /** Fetch links for up to 100 file IDs. Missing entries are left for callers
+   * to retry individually; never associate a link by response order. */
+  public async getDownloadLinks(fsIds:string[]):Promise<Map<string,string>> {
+    const ids=[...new Set(fsIds)];
+    if(!ids.length) return new Map();
+    if(ids.length>100 || ids.some(id=>!/^\d+$/.test(id))) throw new Error("无效的批量文件标识");
+    const token=await this.ensureFreshToken();
+    const url=`https://pan.baidu.com/rest/2.0/xpan/multimedia?method=filemetas&fsids=[${ids.join(",")}]&dlink=1&access_token=${token}`;
+    const data=(await requestUrl({url,method:"GET"})).json;
+    if(data.errno!==0 || !Array.isArray(data.list)) throw new Error(`批量获取下载链接失败 (errno: ${data?.errno})`);
+    const wanted=new Set(ids), links=new Map<string,string>();
+    for(const item of data.list) {
+      const id=String(item.fs_id ?? item.fsId ?? "");
+      if(wanted.has(id) && typeof item.dlink==="string" && item.dlink) links.set(id,item.dlink);
+    }
+    return links;
+  }
+
   /**
    * Download file content as ArrayBuffer with proper User-Agent.
    * On mobile (and for large files), requests are safely chunked using HTTP Range
@@ -252,10 +270,11 @@ export class BaiduClient {
   public async downloadFile(
     fsId: string,
     expectedSize?: number,
-    onProgress?: (downloaded: number, total: number) => void
+    onProgress?: (downloaded: number, total: number) => void,
+    prefetchedLink?: string
   ): Promise<ArrayBuffer> {
     const token = await this.ensureFreshToken();
-    const dlink = await this.getDownloadLink(fsId);
+    const dlink = prefetchedLink || await this.getDownloadLink(fsId);
     
     // Baidu requires appending access_token to dlink and setting User-Agent: pan.baidu.com
     const downloadUrl = dlink.includes("?")
@@ -273,6 +292,7 @@ export class BaiduClient {
           "User-Agent": "pan.baidu.com",
         },
       });
+      onProgress?.(res.arrayBuffer.byteLength, expectedSize);
       return res.arrayBuffer;
     }
 
@@ -288,6 +308,7 @@ export class BaiduClient {
     });
 
     if (firstRes.status === 200) {
+      onProgress?.(firstRes.arrayBuffer.byteLength, expectedSize ?? firstRes.arrayBuffer.byteLength);
       return firstRes.arrayBuffer;
     }
 
@@ -310,11 +331,13 @@ export class BaiduClient {
         method: "GET",
         headers: { "User-Agent": "pan.baidu.com" },
       });
+      onProgress?.(fallbackRes.arrayBuffer.byteLength, fallbackRes.arrayBuffer.byteLength);
       return fallbackRes.arrayBuffer;
     }
 
     const firstBytes = new Uint8Array(firstRes.arrayBuffer);
     if (firstBytes.byteLength === totalSize) {
+      onProgress?.(firstBytes.byteLength, totalSize);
       return firstRes.arrayBuffer;
     }
 

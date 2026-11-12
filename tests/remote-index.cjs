@@ -26,17 +26,45 @@ class Disk {
 function appFor(disk) { return { vault: { configDir: '.custom', adapter: disk, getAbstractFileByPath: () => null } }; }
 
 class Cloud {
- constructor(){this.files=new Map();this.calls=[];this.downloads=[];this.next=0;this.failUpload=null;this.failList=null;}
+ constructor(){this.files=new Map();this.dirs=new Set();this.calls=[];this.downloads=[];this.next=0;this.failUpload=null;this.failList=null;}
  put(path,text){const bytes=typeof text==='string'?enc.encode(text):new Uint8Array(text);const n=++this.next;this.files.set(path,{bytes,info:{path,fsId:String(n),md5:'hash'+n,size:bytes.length,serverMtime:n,isdir:0}});}
- async listFiles(root,recursive=true,shouldYield){if(shouldYield?.())throw Error('SYNC_YIELD_FOR_CONFLICT');this.calls.push([root,recursive]);if(this.failList?.(root))throw Error('listing failed');return [...this.files.values()].map(f=>f.info).filter(f=>f.path.startsWith(root+'/')&&(recursive||!f.path.slice(root.length+1).includes('/')));}
+ async listFiles(root,recursive=true,shouldYield){if(shouldYield?.())throw Error('SYNC_YIELD_FOR_CONFLICT');this.calls.push([root,recursive]);if(this.failList?.(root))throw Error('listing failed');return [...this.files.values()].map(f=>f.info).concat([...this.dirs].map(path=>({path,isdir:1}))).filter(f=>f.path.startsWith(root+'/')&&(recursive||!f.path.slice(root.length+1).includes('/')));}
  async downloadFile(id){this.downloads.push(id);const f=[...this.files.values()].find(f=>f.info.fsId===id);if(!f)throw Error('missing cloud');return f.bytes.slice().buffer;}
  async uploadFile(path,data){if(this.failUpload?.(path))throw Error('upload failed');this.put(path,data);return {fsId:this.files.get(path).info.fsId,md5:this.files.get(path).info.md5};}
- async createDirectory(){}
+ async createDirectory(path){this.dirs.add(path);}
  async deleteFile(path){this.files.delete(path);}
  async deleteFiles(paths){for(const p of paths)this.files.delete(p);return new Map(paths.map(p=>[p,undefined]));}
 }
 function setup(){const disk=new Disk(),cloud=new Cloud(),logs=[];const app=appFor(disk);return{disk,cloud,logs,index:new RemoteIndex(app,cloud,'/root','account',m=>logs.push(m),()=>false),app};}
 (async()=>{
+ // A new device skips downloading pre-existing completed pairs, but reads
+ // open intents and observes changes written during the first full scan.
+ {
+  const t=setup();const old='a'.repeat(32),open='b'.repeat(32),late='c'.repeat(32);
+  const put=(id,phase,paths)=>t.cloud.put('/root/'+INDEX_DIR+'/'+id+'.'+phase+'.json',JSON.stringify({version:1,id,phase,paths}));
+  put(old,'begin',['old.md']);put(old,'done',['old.md']);put(open,'begin',['open.md']);
+  const list=t.cloud.listFiles.bind(t.cloud);let injected=false;
+  t.cloud.listFiles=async(root,recursive=true,yieldFn)=>{const r=await list(root,recursive,yieldFn);if(root==='/root'&&recursive&&!injected){injected=true;put(late,'begin',['late.md']);put(late,'done',['late.md']);t.cloud.put('/root/late.md','new');}return r;};
+  assert.equal((await t.index.inventory()).incremental,false);assert.equal(t.cloud.downloads.length,1,'only open intent is downloaded');
+  t.cloud.downloads=[];const next=await t.index.inventory();assert.equal(next.incremental,true);assert.equal(next.changed,2);assert(next.files.some(f=>f.path==='/root/late.md'));assert.equal(t.cloud.downloads.length,2,'only new records are downloaded');
+ }
+ // A clean device reads a cloud snapshot, applies later journal records and
+ // keeps first-sync deletion protection without recursively listing the vault.
+ {
+  const t=setup();t.cloud.put('/root/a.md','initial');await t.index.inventory();
+  assert([...t.cloud.files.keys()].some(p=>p.includes('/snapshots/')));
+  await t.index.mutate('later.md',async()=>t.cloud.put('/root/later.md','new'));
+  const device=new Disk(),app=appFor(device);t.cloud.calls=[];
+  const fresh=new RemoteIndex(app,t.cloud,'/root','account',()=>{},()=>false);
+  const result=await fresh.inventory();assert.equal(result.incremental,false);assert(result.files.some(f=>f.path==='/root/a.md'));assert(result.files.some(f=>f.path==='/root/later.md'));
+  assert(!t.cloud.calls.some(([p,recursive])=>p==='/root'&&recursive));
+  assert.equal((await fresh.inventory()).incremental,true);
+  // Corrupt cloud snapshots are ignored; incomplete lists never become a cache.
+  const bad=setup();bad.cloud.put('/root/a.md','a');await bad.index.inventory();
+  for(const [p] of bad.cloud.files)if(p.includes('/snapshots/'))bad.cloud.put(p,'{broken');
+  const fresh2=new RemoteIndex(appFor(new Disk()),bad.cloud,'/root','account',()=>{},()=>false);bad.cloud.calls=[];
+  assert.equal((await fresh2.inventory()).incremental,false);assert(bad.cloud.calls.some(([p,recursive])=>p==='/root'&&recursive));
+ }
  // First scan establishes inventory; no-change round makes only a shallow journal listing.
  const x=setup();x.cloud.put('/root/a.md','old');x.cloud.put('/root/sub/b.md','b');
  const first=await x.index.inventory();assert.equal(first.incremental,false);assert.equal(first.files.length,2);
@@ -47,8 +75,15 @@ function setup(){const disk=new Disk(),cloud=new Cloud(),logs=[];const app=appFo
  await x.index.mutateMany(['a.md','new.md','sub/b.md'],async()=>{x.cloud.put('/root/a.md','updated');x.cloud.put('/root/new.md','new');x.cloud.files.delete('/root/sub/b.md');});
  x.cloud.calls=[];const delta=await x.index.inventory();assert.equal(delta.incremental,true);assert.equal(delta.changed,3);
  assert.deepEqual(delta.files.map(f=>f.path).sort(),['/root/a.md','/root/new.md']);
- assert.deepEqual(x.cloud.calls,[['/root/'+INDEX_DIR,false],['/root',false],['/root/sub',false]]);
- x.cloud.calls=[];x.cloud.downloads=[];await x.index.inventory();assert.equal(x.cloud.calls.length,1);assert.equal(x.cloud.downloads.length,0);
+ assert.deepEqual(x.cloud.calls,[['/root/'+INDEX_DIR,false],['/root/'+INDEX_DIR+'/v2',false],['/root',false],['/root/sub',false]]);
+ x.cloud.calls=[];x.cloud.downloads=[];await x.index.inventory();assert.equal(x.cloud.calls.length,2);assert.equal(x.cloud.downloads.length,0);
+ // A reserved v2 subdirectory is ignored by the v1 reader and inventory.
+ const nested=setup();
+ const listNested=nested.cloud.listFiles.bind(nested.cloud);
+ nested.cloud.listFiles=async(root,recursive=true,shouldYield)=>{const result=await listNested(root,recursive,shouldYield);if(root==='/root/'+INDEX_DIR&&!recursive)result.push({path:root+'/v2',isdir:1});return result;};
+ assert.equal((await nested.index.inventory()).files.length,0);
+ assert.equal((await nested.index.inventory()).incremental,true);
+ assert.equal(new SyncEngine(nested.app,()=>({ignoredPatterns:[]}),nested.cloud).shouldIgnore(INDEX_DIR+'/v2/snapshot.json'),true);
  // Failure to register intent prevents any note mutation.
  const y=setup();let mutated=false;y.cloud.failUpload=p=>p.endsWith('.begin.json');
  await assert.rejects(y.index.mutate('a.md',async()=>{mutated=true}));assert.equal(mutated,false);
@@ -92,10 +127,12 @@ function setup(){const disk=new Disk(),cloud=new Cloud(),logs=[];const app=appFo
  await assert.rejects(new RemoteIndex(c.app,c.cloud,'/root','account',()=>{},()=>true).inventory(),/SYNC_YIELD/);
  // Batch intent count stays bounded; notes cannot start before every group is registered.
  const batched=setup();const many=Array.from({length:450},(_,i)=>`folder/${i}.md`);
- await batched.index.mutateMany(many,async()=>{assert.equal([...batched.cloud.files.keys()].filter(p=>p.endsWith('.begin.json')).length,3)});
- assert.equal([...batched.cloud.files.keys()].filter(p=>p.endsWith('.done.json')).length,3);
- const abort=setup();let starts=0;abort.cloud.failUpload=p=>p.endsWith('.begin.json')&&++starts===2;
- let ran=false;await assert.rejects(abort.index.mutateMany(many,async()=>{ran=true}));assert.equal(ran,false);
+ await batched.index.mutateMany(many,async()=>{assert.equal([...batched.cloud.files.keys()].filter(p=>p.endsWith('.begin.json')).length,1)});
+ assert.equal([...batched.cloud.files.keys()].filter(p=>p.endsWith('.done.json')).length,1);
+ const batchRecord=[...batched.cloud.files.entries()].find(([p])=>p.includes('/v2/')&&p.endsWith('.begin.json'));assert.equal(JSON.parse(dec.decode(batchRecord[1].bytes)).paths.length,450);
+ assert.equal((await batched.index.inventory()).incremental,false);assert.equal((await batched.index.inventory()).incremental,true);
+ const abort=setup();const larger=Array.from({length:10001},(_,i)=>`folder/${i}.md`);let starts=0;abort.cloud.failUpload=p=>p.endsWith('.begin.json')&&++starts===2;
+ let ran=false;await assert.rejects(abort.index.mutateMany(larger,async()=>{ran=true}));assert.equal(ran,false);
  // Real engines, two isolated local vaults sharing one cloud: add, modify, clean delete, modify/delete conflict.
  {
   const cloud=new Cloud();cloud.put('/root/note.md','initial');

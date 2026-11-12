@@ -1,5 +1,5 @@
 import { HashCache } from "./hash-cache";
-import { RemoteIndex, INDEX_DIR } from "./remote-index";
+import { RemoteIndex, INDEX_DIR, NEXT_INDEX_DIR } from "./remote-index";
 import { hasConflictMarkers, mergeText } from "./merge";
 import { App, Notice, Platform, TAbstractFile, TFile } from "obsidian";
 import { BaiduClient } from "../api/baidu-client";
@@ -132,7 +132,7 @@ export class SyncEngine {
   private shouldIgnore(vaultPath: string): boolean {
     const norm = normalizeVaultPath(vaultPath);
     if (!norm) return true;
-    if(norm===INDEX_DIR || norm.startsWith(INDEX_DIR+"/")) return true;
+    if(norm===INDEX_DIR || norm.startsWith(INDEX_DIR+"/") || norm===NEXT_INDEX_DIR || norm.startsWith(NEXT_INDEX_DIR+"/")) return true;
     if (/\.conflict-\d{8}-\d{6}(?:-[a-z0-9]+)?(?:\.|$)/.test(norm)) return true;
     
     // Ignore internal temporary and system folders
@@ -280,9 +280,9 @@ export class SyncEngine {
 
         // 2. Gather all remote files
         this.setStatus(settings.incrementalSync ? "检查远端变更记录..." : "完整校验网盘目录...", true);
-        const indexed=settings.incrementalSync ? await this.remoteIndex().inventory(forceFull) : undefined;
+        const indexed=settings.incrementalSync ? await this.remoteIndex().inventory(forceFull,Object.keys(this.stateStore.getAll()).length===0) : undefined;
         const remoteList=indexed ? indexed.files : await this.client.listFiles(settings.remoteBasePath,true,()=>this.interactiveConflictRequests>0);
-        if(indexed) this.log("info",indexed.incremental ? `增量检查：远端 ${indexed.changed} 个变更路径` : "完整目录校验完成，后续使用增量索引");
+        if(indexed) this.log("info",indexed.fromSnapshot ? `云端快照检查完成：复核 ${indexed.changed} 个变更路径` : indexed.incremental ? `增量检查：远端 ${indexed.changed} 个变更路径` : "完整目录校验完成，后续使用增量索引");
         const remoteMap: Map<string, RemoteFileInfo> = new Map();
         for (const rItem of remoteList) {
           if (rItem.isdir === 1) continue;
@@ -539,7 +539,8 @@ export class SyncEngine {
     decision: ConflictDecision,
     local: FileStateInspection,
     remote: FileStateInspection,
-    base?: any
+    base?: any,
+    onDownloadProgress?: (downloaded:number,total:number)=>void
   ): Promise<void> {
     const settings = this.getSettings();
 
@@ -581,7 +582,7 @@ export class SyncEngine {
           throw new Error(`缺少 fs_id 无法下载: ${remotePath}`);
         }
 
-        let data = await this.client.downloadFile(remote.fsId, remote.size);
+        let data = await this.client.downloadFile(remote.fsId, remote.size, onDownloadProgress);
 
         await this.rememberContent(remote,data);
 
@@ -909,13 +910,47 @@ export class SyncEngine {
     });
   }
 
-  public async acceptConflictVersions(paths:string[], side:"local"|"remote", progress?:(done:number,total:number,path:string)=>void) {
+  public async acceptConflictVersions(paths:string[], side:"local"|"remote", progress?:(done:number,total:number,path:string,download?:{downloaded:number;totalBytes:number;bytesPerSecond:number})=>void) {
     this.interactiveConflictRequests++;
     const selected=[...new Set(paths)];
     try {
     const resolved:string[]=[], failed:{path:string;message:string}[]=[];
     progress?.(0,selected.length,"");
+    // Group only known, bounded remote files; deletions and large/unknown files
+    // retain the existing individual confirmation path.
+    const groups=new Map<string,string[]>();
+    if(side==="remote") for(const path of selected) {
+      const record=this.getPendingConflicts().find(c=>c.path===path);
+      if(!record?.remote.exists || !record.remote.fsId || !record.remote.md5 ||
+         !Number.isSafeInteger(record.remote.size) || record.remote.size!<0 || record.remote.size!>4*1024*1024) continue;
+      const parent=record.remotePath.slice(0,record.remotePath.lastIndexOf("/"));
+      const group=groups.get(parent) || [];group.push(path);groups.set(parent,group);
+    }
+    const grouped=new Set<string>();
+    for(const [parent,paths] of groups) {
+      if(paths.length<2) continue;
+      let batchLinks=new Map<string,string>();
+      for(let offset=0;offset<paths.length;offset+=Math.min(8,100-offset%100)) {
+        const batch=paths.slice(offset,offset+Math.min(8,100-offset%100));
+        if(batch.length<2) continue;
+        // Prefetch up to 100 IDs at a time; bounded staging remains eight files.
+        const blockStart=Math.floor(offset/100)*100;
+        if(offset===blockStart) {
+          const records=paths.slice(blockStart,blockStart+100).map(path=>this.getPendingConflicts().find(c=>c.path===path));
+          const ids=records.map(record=>record?.remote.fsId).filter((id):id is string=>!!id && /^\d+$/.test(id));
+          try { batchLinks=await this.client.getDownloadLinks(ids); }
+          catch { batchLinks=new Map();this.log("warn","批量获取下载链接失败，改为逐个获取"); }
+        }
+        const outcome=await this.acceptRemoteBatch(parent,batch,(path,download)=>progress?.(resolved.length+failed.length,selected.length,path,download),batchLinks);
+        for(const item of outcome) {
+          grouped.add(item.path);
+          if(item.error) failed.push({path:item.path,message:item.error}); else resolved.push(item.path);
+          progress?.(resolved.length+failed.length,selected.length,item.path);
+        }
+      }
+    }
     for(const path of selected) {
+      if(grouped.has(path)) continue;
       try {
         await this.syncMutex.acquire(async()=>{
           if(this.getSettings().syncPaused) throw new Error("同步已暂停");
@@ -938,7 +973,14 @@ export class SyncEngine {
             await this.stateStore.save();
             await this.atomicFs.atomicWrite(backup,bytes,calculateMd5(bytes));
           }
-          if(remote.exists) await this.executeAction(path,record.remotePath,{action:"download",reason:"User accepted remote",isConflict:false},local,remote);
+          if(remote.exists) {
+            const started=Date.now();
+            progress?.(resolved.length+failed.length,selected.length,path,{downloaded:0,totalBytes:remote.size || 0,bytesPerSecond:0});
+            await this.executeAction(path,record.remotePath,{action:"download",reason:"User accepted remote",isConflict:false},local,remote,undefined,(downloaded,totalBytes)=>{
+              const seconds=Math.max((Date.now()-started)/1000,0.001);
+              progress?.(resolved.length+failed.length,selected.length,path,{downloaded,totalBytes,bytesPerSecond:downloaded/seconds});
+            });
+          }
           else {if(local.exists) await this.atomicFs.safeDelete(path);this.stateStore.delete(path);}
           const pending=this.getPendingConflicts().find(c=>c.path===path)!;
           this.stateStore.clearConflict(path);
@@ -951,6 +993,74 @@ export class SyncEngine {
     }
     return {resolved,failed};
     } finally {this.interactiveConflictRequests--;}
+  }
+
+  /** Stage small files in bounded groups; re-list the directory after all downloads
+   * and never apply an entry whose remote or local state changed. */
+  private async acceptRemoteBatch(parent:string, paths:string[], report:(path:string,download:{downloaded:number;totalBytes:number;bytesPerSecond:number})=>void, links:Map<string,string>=new Map()):Promise<Array<{path:string;error?:string}>> {
+    return this.syncMutex.acquire(async()=>{
+      const outcome=new Map<string,string|undefined>();
+      type Staged={path:string; record:PendingConflict; remote:RemoteFileInfo; local:FileStateInspection; data:ArrayBuffer};
+      const staged:Staged[]=[];
+      try {
+        if(this.getSettings().syncPaused) throw new Error("同步已暂停");
+        const first=await this.client.listFiles(parent,false);
+        for(const path of paths) {
+          try {
+            if(this.getSettings().syncPaused) throw new Error("同步已暂停");
+            const record=this.getPendingConflicts().find(c=>c.path===path);
+            if(!record || !record.remote.exists) throw new Error("冲突记录已变化，请重新检查");
+            const remote=first.find(f=>f.path===record.remotePath && f.isdir===0);
+            if(!remote || !remote.md5 || !remote.fsId || remote.fsId!==record.remote.fsId || remote.md5!==record.remote.md5 || remote.size!==record.remote.size) throw new Error("远端版本已变化，请刷新冲突后重试");
+            const local=await this.inspectLocalFile(path);
+            const start=Date.now();report(path,{downloaded:0,totalBytes:remote.size,bytesPerSecond:0});
+            const onProgress=(downloaded:number,totalBytes:number)=>report(path,{downloaded,totalBytes,bytesPerSecond:downloaded/Math.max((Date.now()-start)/1000,0.001)});
+            const link=links.get(remote.fsId);
+            let data:ArrayBuffer;
+            try {data=await this.client.downloadFile(remote.fsId,remote.size,onProgress,link);}
+            catch(error) {if(!link) throw error;data=await this.client.downloadFile(remote.fsId,remote.size,onProgress);}
+            if(data.byteLength!==remote.size) throw new Error("下载大小不一致，保留冲突");
+            if(isEncrypted(data) || this.getSettings().enableE2EE) {
+              const password=this.getSettings().e2eePassword;if(!password) throw new Error("无法解密远端文件");
+              data=await decryptData(data,password);
+            }
+            staged.push({path,record,remote,local,data});
+          } catch(e:any) {outcome.set(path,e.message || String(e));}
+        }
+        if(staged.length) {
+          const latest=await this.client.listFiles(parent,false);
+          for(const item of staged) {
+            try {
+              if(this.getSettings().syncPaused) throw new Error("同步已暂停");
+              const currentRecord=this.getPendingConflicts().find(c=>c.path===item.path);
+              if(!currentRecord || JSON.stringify(currentRecord)!==JSON.stringify(item.record)) throw new Error("冲突记录已变化，请重新检查");
+              const remote=latest.find(f=>f.path===item.record.remotePath && f.isdir===0);
+              if(!remote || remote.fsId!==item.remote.fsId || remote.md5!==item.remote.md5 || remote.size!==item.remote.size) throw new Error("下载期间远端已变化，请刷新冲突后重试");
+              const local=await this.inspectLocalFile(item.path);
+              if(local.exists!==item.local.exists || (local.exists && (!local.md5 || local.md5!==item.local.md5))) throw new Error("下载期间本地文件已变化，请重新检查");
+              if(local.exists) {
+                const bytes=await this.atomicFs.readBinary(item.path);
+                if(calculateMd5(bytes)!==local.md5) throw new Error("本地文件已变化，请重新检查");
+                let backup=generateConflictPath(item.path);while(await this.app.vault.adapter.exists(backup)) backup=generateConflictPath(item.path);
+                this.stateStore.setConflict({...currentRecord,copies:[...currentRecord.copies,backup]});
+                await this.stateStore.save();await this.atomicFs.atomicWrite(backup,bytes,calculateMd5(bytes));
+              }
+              const latestLocal=await this.inspectLocalFile(item.path);
+              if(latestLocal.exists!==local.exists || (local.exists && latestLocal.md5!==local.md5)) throw new Error("本地文件已变化，请重新检查");
+              const md5=calculateMd5(item.data);
+              await this.atomicFs.atomicWrite(item.path,item.data,md5,{mtime:remote.localMtime || remote.serverMtime,ctime:remote.localCtime});
+              const stat=await this.app.vault.adapter.stat(item.path);
+              this.stateStore.set(item.path,{path:item.path,localMtime:stat?.mtime || Date.now(),localSize:stat?.size ?? item.data.byteLength,localMd5:md5,remoteFsId:remote.fsId,remoteMtime:remote.serverMtime,remoteMd5:remote.md5!,lastSyncTime:Date.now()});
+              const pending=this.getPendingConflicts().find(c=>c.path===item.path)!;
+              this.stateStore.clearConflict(item.path);
+              try {await this.stateStore.save();} catch(e) {this.stateStore.setConflict(pending);throw e;}
+              outcome.set(item.path,undefined);
+            } catch(e:any) {outcome.set(item.path,e.message || String(e));}
+          }
+        }
+      } catch(e:any) {for(const path of paths) if(!outcome.has(path)) outcome.set(path,e.message || String(e));}
+      return paths.map(path=>({path,error:outcome.get(path)}));
+    });
   }
 
   public async confirmConflictResolved(path: string): Promise<void> {

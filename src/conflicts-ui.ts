@@ -2,6 +2,12 @@ import { mergeText } from "./sync/merge";
 import { App, Modal, Notice, Setting, TFile } from "obsidian";
 import { SyncEngine } from "./sync/engine";
 
+function formatBytes(bytes:number):string {
+  const units=["B","KB","MB","GB"]; let value=Math.max(0,bytes), unit=0;
+  while(value>=1024 && unit<units.length-1) {value/=1024;unit++;}
+  return `${value.toFixed(unit ? 1 : 0)} ${units[unit]}`;
+}
+
 export class ConflictReviewModal extends Modal {
   private selected=new Set<string>();
   private batchBusy=false;
@@ -75,7 +81,14 @@ export class ConflictReviewModal extends Modal {
         b.setDisabled(true);this.batchBusy=true;
         status.setText("等待正在传输的文件安全完成，然后优先处理所选冲突…关闭窗口不会取消正在进行的提交。");
         try {
-          const result=await this.engine.acceptConflictVersions(paths,side,(done,total,path)=>{
+          const result=await this.engine.acceptConflictVersions(paths,side,(done,total,path,download)=>{
+            if(download) {
+              const amount=download.totalBytes ? `${formatBytes(download.downloaded)} / ${formatBytes(download.totalBytes)}` : formatBytes(download.downloaded);
+              const speed=download.downloaded ? `，平均 ${formatBytes(download.bytesPerSecond)}/s` : "，等待下载响应";
+              status.setText(`已处理 ${done}/${total}，正在下载：${path}（${amount}${speed}）`);
+              b.setButtonText(`处理中 ${done}/${total}`);
+              return;
+            }
             status.setText(done===0?`等待同步让出执行机会（0/${total}）…`:`已处理 ${done}/${total}：${path}`);
             b.setButtonText(`处理中 ${done}/${total}`);
           });

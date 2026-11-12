@@ -236,14 +236,31 @@ function ok(value, message) { assert.ok(value, message); checks++; }
     const engine=new SyncEngine(app,()=>({syncPaused:false}),{});
     for(const path of ['one.md','two.md']) engine.stateStore.setConflict({path,remotePath:'/'+path,copies:[],remote:{exists:true,md5:'remote',fsId:'1'},createdAt:1});
     engine.inspectRemoteFile=async()=>({exists:true,md5:'remote',fsId:'1'});
-    engine.executeAction=async(path,remote,decision)=>{assert.equal(decision.action,'download');await engine.atomicFs.atomicWrite(path,enc.encode('remote bytes').buffer)};
-    const result=await engine.acceptConflictVersions(['one.md','missing.md','one.md'],'remote');
+    const progress=[];
+    engine.executeAction=async(path,remote,decision,local,info,base,onDownloadProgress)=>{assert.equal(decision.action,'download');onDownloadProgress(12,12);await engine.atomicFs.atomicWrite(path,enc.encode('remote bytes').buffer)};
+    const result=await engine.acceptConflictVersions(['one.md','missing.md','one.md'],'remote',(done,total,path,download)=>{if(download) progress.push({path,...download})});
+    assert.equal(progress[0].downloaded,0);assert.equal(progress[1].downloaded,12);assert.equal(progress[1].totalBytes,12);assert.ok(progress[1].bytesPerSecond>0);
     assert.deepEqual(result.resolved,['one.md']);assert.equal(result.failed.length,1);assert.equal(await d.read('one.md'),'remote bytes');assert.equal(await d.read('two.md'),'local two');checks+=4;
     const backup=[...d.files.keys()].find(p=>p.startsWith('one.conflict-'));assert.equal(await d.read(backup),'local one');assert.equal(engine.getPendingConflicts().length,1);checks+=2;
     engine.executeAction=async()=>{throw Error('upload failed')};
     const failed=await engine.acceptConflictVersions(['two.md'],'local');assert.equal(failed.failed.length,1);assert.equal(engine.getPendingConflicts().length,1);checks+=2;
     engine.executeAction=async()=>{};
     const done=await engine.acceptConflictVersions(['two.md'],'local');assert.deepEqual(done.resolved,['two.md']);assert.equal(engine.getPendingConflicts().length,0);checks+=2;
+  }
+  // Grouped accept downloads only after an initial listing and verifies again
+  // before replacement; concurrent local/remote edits stay unresolved.
+  for(const scenario of ['stable','remote-change','local-change','listing-failure']) {
+    const d=new Disk(),app=appFor(d);let lists=0,downloads=0;
+    const payload=enc.encode('remote');
+    const entries=['one.md','two.md'].map((name,i)=>({path:'/root/'+name,isdir:0,fsId:String(i+1),md5:'opaque'+i,size:payload.byteLength,serverMtime:1000}));
+    const client={listFiles:async()=>{lists++;if(scenario==='listing-failure' && lists===2)throw Error('network');return entries.map((x,i)=>({...x,md5:scenario==='remote-change'&&lists===2&&i===0?'changed':x.md5}));},downloadFile:async(id)=>{downloads++;if(scenario==='local-change'&&id==='1')await d.write('one.md','new edit');return payload.buffer.slice(0)}};
+    const engine=new SyncEngine(app,()=>({syncPaused:false,remoteBasePath:'/root',appKey:'app',username:'u',enableE2EE:false}),client);
+    for(const [i,name] of ['one.md','two.md'].entries()) {await d.write(name,'old '+name);engine.stateStore.setConflict({path:name,remotePath:'/root/'+name,copies:[],remote:{exists:true,md5:'opaque'+i,fsId:String(i+1),size:payload.byteLength},createdAt:1});}
+    const result=await engine.acceptConflictVersions(['one.md','two.md'],'remote');
+    assert.equal(lists,2);assert.equal(downloads,2);
+    if(scenario==='stable') {assert.equal(result.resolved.length,2);assert.equal(await d.read('one.md'),'remote');assert.equal(engine.getPendingConflicts().length,0);}
+    else if(scenario==='listing-failure') {assert.equal(result.failed.length,2);assert.equal(await d.read('one.md'),'old one.md');assert.equal(engine.getPendingConflicts().length,2);}
+    else {assert.equal(result.failed.length,1);assert.equal(result.resolved.length,1);assert.equal(await d.read('one.md'),scenario==='local-change'?'new edit':'old one.md');assert(engine.getPendingConflicts().some(c=>c.path==='one.md'));}
   }
   // Multiple writer instances share a per-vault lock.
   {
