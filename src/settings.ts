@@ -62,6 +62,14 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
         .addButton(button => button.setButtonText("查看冲突").onClick(() => this.plugin.openConflictReview()));
     }
 
+    if (this.plugin.settings.accessToken && (!this.plugin.settings.appKey || !this.plugin.settings.secretKey)) {
+      const expired=!!this.plugin.settings.tokenExpiresAt && this.plugin.settings.tokenExpiresAt<=Date.now();
+      new Setting(containerEl).setName(expired ? "⚠️ 百度网盘授权已过期" : "⚠️ 自动续期配置不完整")
+        .setDesc(expired
+          ? "当前授权已过期，且缺少 AppKey 或 AppSecret，无法自动续期。请在下方填写原应用的凭据并测试连通性；若续期仍失败，请重新授权。不要将密钥分享给他人。"
+          : "当前缺少 AppKey 或 AppSecret，授权到期后可能无法自动续期。请在下方填写原应用的凭据，并妥善保管密钥。");
+    }
+
     // --- Section 1: Detailed OAuth & Credential Guide ---
     new Setting(containerEl).setName("1. 百度网盘账号授权 (OAuth 2.0)").setHeading();
 

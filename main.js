@@ -506,7 +506,9 @@ var BaiduClient = class {
     this.tokenExpiresAt = options.tokenExpiresAt;
     this.onTokenRefreshed = options.onTokenRefreshed;
   }
-  updateCredentials(accessToken, refreshToken, tokenExpiresAt) {
+  updateCredentials(accessToken, refreshToken, tokenExpiresAt, appKey, secretKey) {
+    if (appKey !== void 0) this.appKey = appKey;
+    if (secretKey !== void 0) this.secretKey = secretKey;
     this.accessToken = accessToken;
     this.refreshToken = refreshToken;
     this.tokenExpiresAt = tokenExpiresAt;
@@ -563,6 +565,10 @@ var BaiduClient = class {
     return this.tokenMutex.acquire(async () => {
       const now = Date.now();
       if (this.refreshToken && this.tokenExpiresAt && this.tokenExpiresAt - now < 3e5) {
+        if ((!this.appKey || !this.secretKey) && this.tokenExpiresAt <= now) {
+          throw new Error("\u767E\u5EA6\u7F51\u76D8\u6388\u6743\u5DF2\u8FC7\u671F\uFF0C\u7F3A\u5C11 AppKey \u6216 AppSecret\uFF0C\u65E0\u6CD5\u81EA\u52A8\u7EED\u671F\uFF1B\u8BF7\u91CD\u65B0\u914D\u7F6E\u6388\u6743");
+        }
+        if (!this.appKey || !this.secretKey) return this.accessToken;
         try {
           const url = "https://openapi.baidu.com/oauth/2.0/token";
           const body = new URLSearchParams({
@@ -592,11 +598,15 @@ var BaiduClient = class {
                 scope: data.scope || ""
               });
             }
+          } else if (this.tokenExpiresAt <= now) {
+            throw new Error("\u767E\u5EA6\u7F51\u76D8\u6388\u6743\u5DF2\u8FC7\u671F\uFF0C\u81EA\u52A8\u7EED\u671F\u5931\u8D25\uFF1B\u8BF7\u91CD\u65B0\u6388\u6743");
           }
         } catch (err) {
-          console.warn("Failed refreshing Baidu access token:", err);
+          if (this.tokenExpiresAt <= now) throw new Error("\u767E\u5EA6\u7F51\u76D8\u6388\u6743\u5DF2\u8FC7\u671F\u6216\u7EED\u671F\u5931\u8D25\uFF1B\u8BF7\u68C0\u67E5\u7F51\u7EDC\u53CA AppKey\u3001AppSecret\uFF0C\u5FC5\u8981\u65F6\u91CD\u65B0\u6388\u6743");
+          console.warn("Baidu token refresh failed; current token remains valid.");
         }
       }
+      if (this.tokenExpiresAt && this.tokenExpiresAt <= now) throw new Error("\u767E\u5EA6\u7F51\u76D8\u6388\u6743\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u91CD\u65B0\u6388\u6743");
       return this.accessToken;
     });
   }
@@ -641,6 +651,7 @@ var BaiduClient = class {
         const url = `https://pan.baidu.com/rest/2.0/xpan/file?method=list&dir=${encodeURIComponent(directory)}&start=${start}&limit=${limit}&web=1&access_token=${token}`;
         const data = (await boundedInventoryRead((0, import_obsidian2.requestUrl)({ url, method: "GET" }))).json;
         if (data.errno === -9 && directory === root && start === 0) return [];
+        if (data.errno === -6) throw new Error("\u767E\u5EA6\u7F51\u76D8\u6388\u6743\u65E0\u6548\u6216\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u91CD\u65B0\u6388\u6743\u540E\u518D\u540C\u6B65 (errno: -6)");
         if (data.errno !== 0 || !Array.isArray(data.list)) {
           throw new Error(`\u8FDC\u7AEF\u76EE\u5F55\u679A\u4E3E\u4E0D\u5B8C\u6574\uFF0C\u5DF2\u505C\u6B62\u540C\u6B65: ${directory} (errno: ${data.errno})`);
         }
@@ -1237,6 +1248,10 @@ var BaiduSyncSettingTab = class extends import_obsidian3.PluginSettingTab {
       new import_obsidian3.Setting(containerEl).setName("\u624B\u673A\u540C\u6B65").setDesc("\u63D0\u793A\uFF1A\u9996\u6B21\u6216\u5B8C\u6574\u626B\u63CF\u53EF\u80FD\u8017\u65F6\u8F83\u957F\uFF0C\u8BF7\u4FDD\u6301 Obsidian \u5728\u524D\u53F0\u5E76\u4EAE\u5C4F\u3002\u626B\u63CF\u4E2D\u65AD\u540E\uFF0C\u4E0B\u6B21\u540C\u6B65\u53EF\u80FD\u9700\u8981\u91CD\u65B0\u626B\u63CF\uFF1B\u5DF2\u6210\u529F\u4E0B\u8F7D\u7684\u6587\u4EF6\u4F1A\u4FDD\u7559\u3002").addButton((button) => button.setButtonText("\u7ACB\u5373\u540C\u6B65").setCta().onClick(async () => {
         await this.plugin.runSync();
       })).addButton((button) => button.setButtonText("\u67E5\u770B\u8FDB\u5EA6").onClick(() => this.plugin.openSyncProgress())).addButton((button) => button.setButtonText("\u67E5\u770B\u51B2\u7A81").onClick(() => this.plugin.openConflictReview()));
+    }
+    if (this.plugin.settings.accessToken && (!this.plugin.settings.appKey || !this.plugin.settings.secretKey)) {
+      const expired = !!this.plugin.settings.tokenExpiresAt && this.plugin.settings.tokenExpiresAt <= Date.now();
+      new import_obsidian3.Setting(containerEl).setName(expired ? "\u26A0\uFE0F \u767E\u5EA6\u7F51\u76D8\u6388\u6743\u5DF2\u8FC7\u671F" : "\u26A0\uFE0F \u81EA\u52A8\u7EED\u671F\u914D\u7F6E\u4E0D\u5B8C\u6574").setDesc(expired ? "\u5F53\u524D\u6388\u6743\u5DF2\u8FC7\u671F\uFF0C\u4E14\u7F3A\u5C11 AppKey \u6216 AppSecret\uFF0C\u65E0\u6CD5\u81EA\u52A8\u7EED\u671F\u3002\u8BF7\u5728\u4E0B\u65B9\u586B\u5199\u539F\u5E94\u7528\u7684\u51ED\u636E\u5E76\u6D4B\u8BD5\u8FDE\u901A\u6027\uFF1B\u82E5\u7EED\u671F\u4ECD\u5931\u8D25\uFF0C\u8BF7\u91CD\u65B0\u6388\u6743\u3002\u4E0D\u8981\u5C06\u5BC6\u94A5\u5206\u4EAB\u7ED9\u4ED6\u4EBA\u3002" : "\u5F53\u524D\u7F3A\u5C11 AppKey \u6216 AppSecret\uFF0C\u6388\u6743\u5230\u671F\u540E\u53EF\u80FD\u65E0\u6CD5\u81EA\u52A8\u7EED\u671F\u3002\u8BF7\u5728\u4E0B\u65B9\u586B\u5199\u539F\u5E94\u7528\u7684\u51ED\u636E\uFF0C\u5E76\u59A5\u5584\u4FDD\u7BA1\u5BC6\u94A5\u3002");
     }
     new import_obsidian3.Setting(containerEl).setName("1. \u767E\u5EA6\u7F51\u76D8\u8D26\u53F7\u6388\u6743 (OAuth 2.0)").setHeading();
     const guideBox = containerEl.createDiv({ cls: "baidu-sync-card" });
@@ -1955,6 +1970,7 @@ var NEXT_INDEX_DIR = INDEX_DIR + "/v2";
 var SNAPSHOT_DIR = INDEX_DIR + "/snapshots";
 var SNAPSHOT_LIMIT = 20 * 1024 * 1024;
 var AUDIT_INTERVAL = 24 * 60 * 60 * 1e3;
+var COMPACTION_INTERVAL = 60 * 60 * 1e3;
 function validPath(path) {
   return typeof path === "string" && path.length > 0 && path.length <= 4096 && !/[\\\x00-\x1f]/.test(path) && normalizeVaultPath(path) === path && path.split("/").every((p) => p !== "." && p !== "..") && path !== INDEX_DIR && !path.startsWith(INDEX_DIR + "/") && path !== NEXT_INDEX_DIR && !path.startsWith(NEXT_INDEX_DIR + "/");
 }
@@ -1992,6 +2008,7 @@ var RemoteIndex = class {
         if (typeof f.path !== "string" || !f.path.startsWith(prefix) || !validPath(f.path.slice(prefix.length)) || paths.has(f.path) || f.isdir !== 0 || typeof f.fsId !== "string" || !Number.isFinite(f.size) || !Number.isFinite(f.serverMtime)) return;
         paths.add(f.path);
       }
+      if (d.compactedAt !== void 0 && (!Number.isFinite(d.compactedAt) || d.compactedAt < 0 || d.compactedAt > Date.now())) return;
       if (d.historical !== void 0 && (!d.historical || typeof d.historical !== "object" || Array.isArray(d.historical) || Object.entries(d.historical).some(([name, value]) => !/^(?:v2\/)?[a-f0-9]{32}\.(?:begin|done)\.json$/.test(name) || typeof value !== "string"))) return;
       for (const [name, item] of Object.entries(d.events)) {
         if (typeof item.fingerprint !== "string") return;
@@ -2023,10 +2040,7 @@ var RemoteIndex = class {
   async publishSnapshot(cache) {
     const data = JSON.stringify({ checksum: calculateMd5(new TextEncoder().encode(JSON.stringify(cache)).buffer), data: cache });
     const bytes = new TextEncoder().encode(data);
-    if (bytes.byteLength > SNAPSHOT_LIMIT) {
-      this.log("\u4E91\u7AEF\u5FEB\u7167\u8FC7\u5927\uFF0C\u8DF3\u8FC7\u4E0A\u4F20");
-      return;
-    }
+    if (bytes.byteLength > SNAPSHOT_LIMIT) throw new Error("\u4E91\u7AEF\u5FEB\u7167\u8FC7\u5927");
     const dir = toRemotePath(this.root, SNAPSHOT_DIR);
     await this.client.createDirectory(this.root);
     await this.client.createDirectory(toRemotePath(this.root, INDEX_DIR));
@@ -2049,6 +2063,24 @@ var RemoteIndex = class {
       }
     }
     return;
+  }
+  /** Fold only complete, validated intent pairs into the fingerprint boundary.
+   * Remote records stay untouched; unfinished intents must remain inspectable. */
+  compactCompleted(cache) {
+    const historical = { ...cache.historical }, events = { ...cache.events };
+    let count = 0;
+    for (const [name, item] of Object.entries(cache.events)) {
+      if (item.event.phase !== "begin") continue;
+      const prefix = name.startsWith("v2/") ? "v2/" : "";
+      const doneName = prefix + item.event.id + ".done.json", done = cache.events[doneName];
+      if (!done || JSON.stringify(done.event.paths) !== JSON.stringify(item.event.paths)) continue;
+      historical[name] = item.fingerprint;
+      historical[doneName] = done.fingerprint;
+      delete events[name];
+      delete events[doneName];
+      count++;
+    }
+    return { cache: { ...cache, historical, events }, count };
   }
   async save(cache) {
     const checksum = calculateMd5(new TextEncoder().encode(JSON.stringify(cache)).buffer);
@@ -2181,7 +2213,9 @@ var RemoteIndex = class {
       this.phase?.("\u5B8C\u6574\u6821\u9A8C\u76EE\u5F55\uFF0C\u5EFA\u7ACB\u540C\u6B65\u7D22\u5F15...");
       const files2 = (await this.client.listFiles(this.root, true, this.shouldYield)).filter((f) => f.isdir === 0 && !f.path.startsWith(toRemotePath(this.root, INDEX_DIR) + "/") && !f.path.startsWith(toRemotePath(this.root, NEXT_INDEX_DIR) + "/"));
       if (events) {
-        const snapshot = { version: 1, scope: this.scope, auditedAt: Date.now(), files: files2, events, historical };
+        const original = { version: 1, scope: this.scope, auditedAt: Date.now(), files: files2, events, historical };
+        const compacted = this.compactCompleted(original);
+        const snapshot = { ...compacted.cache, compactedAt: Date.now() };
         await this.save(snapshot);
         try {
           await this.publishSnapshot(snapshot);
@@ -2207,7 +2241,21 @@ var RemoteIndex = class {
       else files.delete(absolute);
     }
     const result = [...files.values()];
-    await this.save({ ...cache, files: result, events, historical });
+    let next = { ...cache, files: result, events, historical };
+    if (Date.now() - (cache.compactedAt || cache.auditedAt) >= COMPACTION_INTERVAL) {
+      const compacted = this.compactCompleted(next);
+      if (compacted.count) {
+        const candidate = { ...compacted.cache, compactedAt: Date.now() };
+        try {
+          await this.publishSnapshot(candidate);
+          next = candidate;
+          this.log(`\u5DF2\u5C06 ${compacted.count} \u7EC4\u5DF2\u5B8C\u6210\u53D8\u66F4\u5408\u5E76\u5230\u5FEB\u7167\uFF0C\u65E7\u8BB0\u5F55\u4FDD\u7559`);
+        } catch {
+          this.log("\u5B9A\u671F\u5408\u5E76\u5FEB\u7167\u5931\u8D25\uFF0C\u4FDD\u7559\u539F\u6709\u8BB0\u5F55\u5E76\u5728\u540E\u7EED\u540C\u6B65\u91CD\u8BD5");
+        }
+      }
+    }
+    await this.save(next);
     return { files: result, incremental: !snapshotUsed, changed: changed.size, fromSnapshot: snapshotUsed };
   }
   async mutate(path, operation) {
@@ -3012,7 +3060,7 @@ var SyncEngine = class {
         const friendlyDetail = isNetworkOrDns ? `\u7F51\u7EDC\u4E2D\u65AD\u6216\u57DF\u540D\u89E3\u6790\u5931\u8D25\uFF08\u624B\u673A\u4F11\u7720\u606F\u5C4F\u3001\u4EE3\u7406\u5206\u6D41\u6216\u7F51\u7EDC\u4E2D\u65AD\uFF09\uFF1A${rawErr}` : rawErr;
         this.log("error", "\u5168\u91CF\u540C\u6B65\u8FC7\u7A0B\u5F02\u5E38\u9000\u51FA", friendlyDetail);
         if (interactive) new import_obsidian5.Notice(`\u767E\u5EA6\u7F51\u76D8\u540C\u6B65\u9519\u8BEF: ${friendlyDetail}`, 1e4);
-        this.setStatus("\u540C\u6B65\u51FA\u9519", false);
+        this.setStatus(/百度网盘授权/.test(friendlyDetail) ? friendlyDetail : "\u540C\u6B65\u51FA\u9519", false);
       } finally {
         this.isSyncing = false;
         this.progressFinishedAt = Date.now();
@@ -3977,7 +4025,9 @@ var BaiduNetdiskSyncPlugin = class extends import_obsidian7.Plugin {
       this.baiduClient.updateCredentials(
         this.settings.accessToken,
         this.settings.refreshToken,
-        this.settings.tokenExpiresAt
+        this.settings.tokenExpiresAt,
+        this.settings.appKey,
+        this.settings.secretKey
       );
     }
   }

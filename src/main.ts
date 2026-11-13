@@ -141,7 +141,9 @@ export default class BaiduNetdiskSyncPlugin extends Plugin {
       this.baiduClient.updateCredentials(
         this.settings.accessToken,
         this.settings.refreshToken,
-        this.settings.tokenExpiresAt
+        this.settings.tokenExpiresAt,
+        this.settings.appKey,
+        this.settings.secretKey
       );
     }
   }

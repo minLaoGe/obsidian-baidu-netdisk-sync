@@ -65,6 +65,33 @@ function setup(){const disk=new Disk(),cloud=new Cloud(),logs=[];const app=appFo
   const fresh2=new RemoteIndex(appFor(new Disk()),bad.cloud,'/root','account',()=>{},()=>false);bad.cloud.calls=[];
   assert.equal((await fresh2.inventory()).incremental,false);assert(bad.cloud.calls.some(([p,recursive])=>p==='/root'&&recursive));
  }
+ // Timed compaction folds completed entries only and keeps all cloud files.
+ {
+  const t=setup();await t.index.inventory();
+  await t.index.mutate('done.md',async()=>t.cloud.put('/root/done.md','done'));
+  t.cloud.failUpload=p=>p.endsWith('.done.json');
+  await t.index.mutate('open.md',async()=>t.cloud.put('/root/open.md','open'));t.cloud.failUpload=null;
+  const cachePath='.custom/plugins/baidu-sync/remote-index.json';const envelope=JSON.parse(await t.disk.read(cachePath));
+  envelope.data.compactedAt=Date.now()-3601000;
+  envelope.checksum=require('node:crypto').createHash('md5').update(JSON.stringify(envelope.data)).digest('hex');
+  await t.disk.write(cachePath,JSON.stringify(envelope));
+  const pathsBefore=new Set(t.cloud.files.keys());await t.index.inventory();
+  const updated=JSON.parse(await t.disk.read(cachePath)).data;
+  assert.equal(Object.keys(updated.historical).length,2);assert.equal(Object.keys(updated.events).length,1);
+  for(const name of pathsBefore)assert(t.cloud.files.has(name),'cloud records are retained');
+  const fresh=new RemoteIndex(appFor(new Disk()),t.cloud,'/root','account',()=>{},()=>false);
+  const got=await fresh.inventory();assert(got.files.some(f=>f.path==='/root/done.md'));assert(got.files.some(f=>f.path==='/root/open.md'));
+  t.cloud.put('/root/open.md','later');const follow=await fresh.inventory();assert(follow.changed>=1,'unfinished record is rechecked');
+ }
+ // Failed snapshot publication retains event contents for retry.
+ {
+  const t=setup();await t.index.inventory();await t.index.mutate('file.md',async()=>t.cloud.put('/root/file.md','a'));
+  const key='.custom/plugins/baidu-sync/remote-index.json',e=JSON.parse(await t.disk.read(key));e.data.compactedAt=Date.now()-3601000;
+  e.checksum=require('node:crypto').createHash('md5').update(JSON.stringify(e.data)).digest('hex');await t.disk.write(key,JSON.stringify(e));
+  t.cloud.failUpload=p=>p.includes('/snapshots/');await t.index.inventory();
+  let stored=JSON.parse(await t.disk.read(key)).data;assert.equal(Object.keys(stored.events).length,2);
+  t.cloud.failUpload=null;await t.index.inventory();stored=JSON.parse(await t.disk.read(key)).data;assert.equal(Object.keys(stored.events).length,0);assert.equal(Object.keys(stored.historical).length,2);
+ }
  // First scan establishes inventory; no-change round makes only a shallow journal listing.
  const x=setup();x.cloud.put('/root/a.md','old');x.cloud.put('/root/sub/b.md','b');
  const first=await x.index.inventory();assert.equal(first.incremental,false);assert.equal(first.files.length,2);

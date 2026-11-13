@@ -11,6 +11,7 @@ export const NEXT_INDEX_DIR = INDEX_DIR + "/v2";
 const SNAPSHOT_DIR = INDEX_DIR + "/snapshots";
 const SNAPSHOT_LIMIT = 20 * 1024 * 1024;
 const AUDIT_INTERVAL = 24 * 60 * 60 * 1000;
+const COMPACTION_INTERVAL = 60 * 60 * 1000;
 export { boundedInventoryRead } from "../utils/read-timeout";
 import { boundedInventoryRead } from "../utils/read-timeout";
 interface Event { version: 1; id: string; phase: "begin" | "done"; paths: string[]; }
@@ -18,6 +19,7 @@ interface Cache {
   version: 1; scope: string; auditedAt: number;
   files: RemoteFileInfo[];
   historical?: Record<string,string>;
+  compactedAt?: number;
   events: Record<string,{ fingerprint:string; event:Event }>;
 }
 function validPath(path:unknown): path is string {
@@ -56,6 +58,7 @@ export class RemoteIndex {
         if(typeof f.path!=="string" || !f.path.startsWith(prefix) || !validPath(f.path.slice(prefix.length)) || paths.has(f.path) || f.isdir!==0 || typeof f.fsId!=="string" || !Number.isFinite(f.size) || !Number.isFinite(f.serverMtime)) return;
         paths.add(f.path);
       }
+      if(d.compactedAt!==undefined && (!Number.isFinite(d.compactedAt) || d.compactedAt<0 || d.compactedAt>Date.now())) return;
       if(d.historical!==undefined && (!d.historical || typeof d.historical!=="object" || Array.isArray(d.historical) || Object.entries(d.historical).some(([name,value])=>! /^(?:v2\/)?[a-f0-9]{32}\.(?:begin|done)\.json$/.test(name) || typeof value!=="string"))) return;
       for(const [name,item] of Object.entries(d.events) as [string,any][]) {
         if(typeof item.fingerprint!=="string") return;
@@ -77,7 +80,7 @@ export class RemoteIndex {
   private async publishSnapshot(cache:Cache):Promise<void> {
     const data=JSON.stringify({checksum:calculateMd5(new TextEncoder().encode(JSON.stringify(cache)).buffer),data:cache});
     const bytes=new TextEncoder().encode(data);
-    if(bytes.byteLength>SNAPSHOT_LIMIT) {this.log("云端快照过大，跳过上传");return;}
+    if(bytes.byteLength>SNAPSHOT_LIMIT) throw new Error("云端快照过大");
     const dir=toRemotePath(this.root,SNAPSHOT_DIR);
     await this.client.createDirectory(this.root);
     await this.client.createDirectory(toRemotePath(this.root,INDEX_DIR));
@@ -98,6 +101,21 @@ export class RemoteIndex {
       } catch(e:any) {if(e.message==="SYNC_YIELD_FOR_CONFLICT") throw e;}
     }
     return;
+  }
+  /** Fold only complete, validated intent pairs into the fingerprint boundary.
+   * Remote records stay untouched; unfinished intents must remain inspectable. */
+  private compactCompleted(cache:Cache):{cache:Cache;count:number} {
+    const historical={...cache.historical}, events={...cache.events};
+    let count=0;
+    for(const [name,item] of Object.entries(cache.events)) {
+      if(item.event.phase!=="begin") continue;
+      const prefix=name.startsWith("v2/") ? "v2/" : "";
+      const doneName=prefix+item.event.id+".done.json", done=cache.events[doneName];
+      if(!done || JSON.stringify(done.event.paths)!==JSON.stringify(item.event.paths)) continue;
+      historical[name]=item.fingerprint;historical[doneName]=done.fingerprint;
+      delete events[name];delete events[doneName];count++;
+    }
+    return {cache:{...cache,historical,events},count};
   }
   private async save(cache:Cache) {
     const checksum=calculateMd5(new TextEncoder().encode(JSON.stringify(cache)).buffer);
@@ -209,7 +227,9 @@ export class RemoteIndex {
       // Only a validated journal captured BEFORE the scan can advance the cursor.
       // Open begins are rechecked on every later round; new commits remain unseen.
       if(events) {
-        const snapshot:Cache={version:1,scope:this.scope,auditedAt:Date.now(),files,events,historical};
+        const original:Cache={version:1,scope:this.scope,auditedAt:Date.now(),files,events,historical};
+        const compacted=this.compactCompleted(original);
+        const snapshot:Cache={...compacted.cache,compactedAt:Date.now()};
         await this.save(snapshot);
         try {await this.publishSnapshot(snapshot);} catch {this.log("云端索引快照上传失败，本机索引仍可使用");}
       }
@@ -230,7 +250,19 @@ export class RemoteIndex {
       if(actual) files.set(absolute,actual); else files.delete(absolute);
     }
     const result=[...files.values()];
-    await this.save({...cache,files:result,events,historical});
+    let next:Cache={...cache,files:result,events,historical};
+    if(Date.now()-(cache.compactedAt || cache.auditedAt)>=COMPACTION_INTERVAL) {
+      const compacted=this.compactCompleted(next);
+      if(compacted.count) {
+        const candidate={...compacted.cache,compactedAt:Date.now()};
+        try {
+          await this.publishSnapshot(candidate);
+          next=candidate;
+          this.log(`已将 ${compacted.count} 组已完成变更合并到快照，旧记录保留`);
+        } catch {this.log("定期合并快照失败，保留原有记录并在后续同步重试");}
+      }
+    }
+    await this.save(next);
     return {files:result,incremental:!snapshotUsed,changed:changed.size,fromSnapshot:snapshotUsed};
   }
   async mutate<T>(path:string,operation:()=>Promise<T>):Promise<T> {

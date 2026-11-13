@@ -520,7 +520,7 @@ export class SyncEngine {
           : rawErr;
         this.log("error", "全量同步过程异常退出", friendlyDetail);
         if (interactive) new Notice(`百度网盘同步错误: ${friendlyDetail}`, 10000);
-        this.setStatus("同步出错", false);
+        this.setStatus(/百度网盘授权/.test(friendlyDetail) ? friendlyDetail : "同步出错", false);
       } finally {
         this.isSyncing = false; this.progressFinishedAt = Date.now(); this.currentFiles.clear();
         this.setStatus(this.progressStatus, false);

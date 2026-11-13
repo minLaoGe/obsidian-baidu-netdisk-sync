@@ -40,8 +40,12 @@ export class BaiduClient {
   public updateCredentials(
     accessToken: string,
     refreshToken: string,
-    tokenExpiresAt: number
+    tokenExpiresAt: number,
+    appKey?: string,
+    secretKey?: string
   ) {
+    if (appKey !== undefined) this.appKey = appKey;
+    if (secretKey !== undefined) this.secretKey = secretKey;
     this.accessToken = accessToken;
     this.refreshToken = refreshToken;
     this.tokenExpiresAt = tokenExpiresAt;
@@ -110,6 +114,10 @@ export class BaiduClient {
       // If token expires within 5 minutes, refresh
       const now = Date.now();
       if (this.refreshToken && this.tokenExpiresAt && this.tokenExpiresAt - now < 300000) {
+        if ((!this.appKey || !this.secretKey) && this.tokenExpiresAt <= now) {
+          throw new Error("百度网盘授权已过期，缺少 AppKey 或 AppSecret，无法自动续期；请重新配置授权");
+        }
+        if (!this.appKey || !this.secretKey) return this.accessToken;
         try {
           const url = "https://openapi.baidu.com/oauth/2.0/token";
           const body = new URLSearchParams({
@@ -141,11 +149,15 @@ export class BaiduClient {
                 scope: data.scope || "",
               });
             }
+          } else if (this.tokenExpiresAt <= now) {
+            throw new Error("百度网盘授权已过期，自动续期失败；请重新授权");
           }
         } catch (err) {
-          console.warn("Failed refreshing Baidu access token:", err);
+          if (this.tokenExpiresAt <= now) throw new Error("百度网盘授权已过期或续期失败；请检查网络及 AppKey、AppSecret，必要时重新授权");
+          console.warn("Baidu token refresh failed; current token remains valid.");
         }
       }
+      if (this.tokenExpiresAt && this.tokenExpiresAt <= now) throw new Error("百度网盘授权已过期，请重新授权");
       return this.accessToken;
     });
   }
@@ -196,6 +208,7 @@ export class BaiduClient {
         const url = `https://pan.baidu.com/rest/2.0/xpan/file?method=list&dir=${encodeURIComponent(directory)}&start=${start}&limit=${limit}&web=1&access_token=${token}`;
         const data = (await boundedInventoryRead(requestUrl({url, method:"GET"}))).json;
         if (data.errno === -9 && directory === root && start === 0) return [];
+        if (data.errno === -6) throw new Error("百度网盘授权无效或已过期，请重新授权后再同步 (errno: -6)");
         if (data.errno !== 0 || !Array.isArray(data.list)) {
           throw new Error(`远端目录枚举不完整，已停止同步: ${directory} (errno: ${data.errno})`);
         }
