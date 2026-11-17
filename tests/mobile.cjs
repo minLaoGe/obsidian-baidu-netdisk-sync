@@ -33,6 +33,19 @@ vm.runInNewContext(esbuild.buildSync({entryPoints:['src/sync/engine.ts'],bundle:
  settings.mobileManualSync=false;engine.handleLocalFileDeleted({path:'note.md'});assert.equal(engine.debounceManager.timers.size,1);
  engine.dispose();assert.equal(engine.debounceManager.timers.size,0);
  await engine.syncSingleFile('note.md',true);
+ // Execute the bounded journal writer in the same browser-only sandbox, not
+ // merely import it: mobile must persist identity without fs/Buffer/Node APIs.
+ context.module={exports:{}};context.exports=context.module.exports;
+ vm.runInNewContext(esbuild.buildSync({entryPoints:['src/sync/rolling-journal.ts'],bundle:true,platform:'browser',format:'cjs',write:false,external:['obsidian']}).outputFiles[0].text,context);
+ const {RollingJournal}=context.module.exports,storage=new Map(),cloud=new Map();let completed=0;
+ const app={loadLocalStorage:k=>storage.get(k)||null,saveLocalStorage:(k,v)=>{if(v===null)storage.delete(k);else storage.set(k,v);}};
+ const client={uploadFile:async(p,b)=>{cloud.set(p,new Uint8Array(b));return{fsId:'1',md5:'hash'};}};
+ const journal=new RollingJournal(app,client,'/root/index','scope',p=>typeof p==='string',()=>{});
+ await Promise.all(Array.from({length:70},(_,i)=>journal.mutate([profile+'/'+i+'.md'],async()=>{completed++;})));
+ assert.equal(completed,70);assert.equal(cloud.size,1);
+ const bytes=[...cloud.values()][0],stored=JSON.parse(new TextDecoder().decode(bytes));
+ assert.equal(stored.entries.length,64);assert.equal(stored.entries.at(-1).sequence,70);assert(bytes.length<=256*1024);
+ console.log('PASS: '+profile+' bounded journal executes 70 queued writes without Node and retains one device file');
  console.log('PASS: '+profile+' loads without Node, defaults to manual sync, displays progress, blocks queued uploads and cleans up');
 })().catch(e=>{console.error(e);process.exitCode=1});
 

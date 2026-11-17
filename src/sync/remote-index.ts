@@ -4,6 +4,7 @@ import { RemoteFileInfo } from "../types";
 import { AtomicFileSystem } from "../utils/atomic";
 import { calculateMd5 } from "../utils/crypto";
 import { normalizeVaultPath, toRemotePath } from "../utils/path";
+import { JOURNAL_BYTES, JOURNAL_NAME, Journals, RollingJournal, journalChanges, validateJournal } from "./rolling-journal";
 
 export const INDEX_DIR = ".baidu-sync-index-v1";
 // Reserved during migration: all devices must ignore this before v2 writes begin.
@@ -12,15 +13,19 @@ const SNAPSHOT_DIR = INDEX_DIR + "/snapshots";
 const SNAPSHOT_LIMIT = 20 * 1024 * 1024;
 const AUDIT_INTERVAL = 24 * 60 * 60 * 1000;
 const COMPACTION_INTERVAL = 60 * 60 * 1000;
+// Catch up a large legacy backlog with a directory inventory instead of
+// thousands of individual get-link/download requests for tiny JSON objects.
+const LEGACY_DOWNLOAD_LIMIT = 128;
 export { boundedInventoryRead } from "../utils/read-timeout";
 import { boundedInventoryRead } from "../utils/read-timeout";
 interface Event { version: 1; id: string; phase: "begin" | "done"; paths: string[]; }
 interface Cache {
-  version: 1; scope: string; auditedAt: number;
+  version: 1 | 2; scope: string; auditedAt: number;
   files: RemoteFileInfo[];
   historical?: Record<string,string>;
   compactedAt?: number;
   events: Record<string,{ fingerprint:string; event:Event }>;
+  rolling?: Journals;
 }
 function validPath(path:unknown): path is string {
   return typeof path === "string" && path.length>0 && path.length<=4096 &&
@@ -51,7 +56,7 @@ export class RemoteIndex {
     try {
       const d=envelope.data;
       if(!d || envelope.checksum!==calculateMd5(new TextEncoder().encode(JSON.stringify(d)).buffer)) return;
-      if(d.version!==1 || d.scope!==this.scope || !Number.isFinite(d.auditedAt) || d.auditedAt>Date.now() || !Array.isArray(d.files) || !d.events || typeof d.events!=="object" || Array.isArray(d.events)) return;
+      if((d.version!==1 && d.version!==2) || d.scope!==this.scope || !Number.isFinite(d.auditedAt) || d.auditedAt>Date.now() || !Array.isArray(d.files) || !d.events || typeof d.events!=="object" || Array.isArray(d.events)) return;
       const paths=new Set<string>();
       for(const f of d.files) {
         const prefix=toRemotePath(this.root,"")+"/";
@@ -63,6 +68,13 @@ export class RemoteIndex {
       for(const [name,item] of Object.entries(d.events) as [string,any][]) {
         if(typeof item.fingerprint!=="string") return;
         validateEvent(item.event,name);
+      }
+      if(d.rolling!==undefined) {
+        if(d.version!==2 || !d.rolling || typeof d.rolling!=="object" || Array.isArray(d.rolling)) return;
+        for(const [name,item] of Object.entries(d.rolling) as [string,any][]) {
+          if(typeof item?.fingerprint!=="string") return;
+          validateJournal(item.journal,name,validPath);
+        }
       }
       return d;
     } catch {return;}
@@ -125,11 +137,12 @@ export class RemoteIndex {
     const cache=await this.load();
     if(cache) await this.save({...cache,auditedAt:0});
   }
-  private async journal():Promise<Map<string,RemoteFileInfo>> {
+  private async journal():Promise<{legacy:Map<string,RemoteFileInfo>;rolling:Map<string,RemoteFileInfo>}> {
     this.checkYield();
     const base=toRemotePath(this.root,INDEX_DIR);
     const list=await this.client.listFiles(base,false,this.shouldYield);
     const map=new Map<string,RemoteFileInfo>();
+    const rolling=new Map<string,RemoteFileInfo>();
     let hasV2=false;
     for(const f of list) {
       const name=f.path.slice(base.length+1);
@@ -142,11 +155,29 @@ export class RemoteIndex {
       const nested=toRemotePath(this.root,NEXT_INDEX_DIR);
       for(const f of await this.client.listFiles(nested,false,this.shouldYield)) {
         const name=f.path.slice(nested.length+1);
+        if(f.isdir===0 && f.path.startsWith(nested+"/") && JOURNAL_NAME.test(name) && f.size>0 && f.size<=JOURNAL_BYTES) {
+          rolling.set(name,f);continue;
+        }
         if(f.isdir || !f.path.startsWith(nested+"/") || !/^[a-f0-9]{32}\.(begin|done)\.json$/.test(name) || f.size>1048576) throw new Error("批量变更目录包含无效记录");
         map.set("v2/"+name,f);
       }
     }
-    return map;
+    return {legacy:map,rolling};
+  }
+  private async rollingEvents(list:Map<string,RemoteFileInfo>,cache?:Cache):Promise<Journals> {
+    const result:Journals={};
+    for(const [name,file] of list) {
+      this.checkYield();
+      const previous=cache?.rolling?.[name];
+      if(previous?.fingerprint===fingerprint(file)) result[name]=previous;
+      else {
+        const bytes=await boundedInventoryRead(this.client.downloadFile(file.fsId,file.size));
+        if(bytes.byteLength!==file.size || bytes.byteLength>JOURNAL_BYTES) throw new Error("设备变更日志大小不一致");
+        const journal=validateJournal(JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(bytes)),name,validPath);
+        result[name]={fingerprint:fingerprint(file),journal};
+      }
+    }
+    return result;
   }
   private async events(list:Map<string,RemoteFileInfo>,cache?:Cache) {
     const events:Cache["events"]={};
@@ -195,10 +226,27 @@ export class RemoteIndex {
       catch(e:any) {if(e.message==="SYNC_YIELD_FOR_CONFLICT") throw e;this.log("云端快照不可用，执行完整校验");}
     }
     let list:Map<string,RemoteFileInfo>|undefined, events:Cache["events"]|undefined;
+    let rolling:Journals={};
+    let rollingDelta={paths:new Set<string>(),audit:false};
     let historical:Record<string,string>={...cache?.historical};
     try {
-      list=await this.journal();
-      if(!cache) {
+      const journal=await this.journal();
+      list=journal.legacy;
+      rolling=await this.rollingEvents(journal.rolling,cache);
+      rollingDelta=journalChanges(cache?.rolling || {},rolling);
+      if(rollingDelta.audit) {force=true;this.log("设备日志已轮换、缺失或需要完整校验，重新扫描目录以避免遗漏变更");}
+      if(Object.entries(historical).some(([name,value])=>!list!.has(name) || fingerprint(list!.get(name)!)!==value)) {
+        historical={};force=true;this.log("历史记录发生变化，重新完整校验");
+      }
+      if(cache && Object.entries(cache.events).some(([name,item])=>!list!.has(name) || fingerprint(list!.get(name)!)!==item.fingerprint)) {
+        force=true;this.log("历史变更记录被删除或修改，重新完整校验后重建游标");
+      }
+      const unreadLegacy=()=>[...list!].filter(([name,file])=>historical[name]!==fingerprint(file) && cache?.events[name]?.fingerprint!==fingerprint(file)).length;
+      if(cache && unreadLegacy()>LEGACY_DOWNLOAD_LIMIT) {
+        force=true;this.log("旧格式变更记录积压较多，改用目录分页校验，跳过逐条下载已完成记录");
+      }
+      if(!cache || force || Date.now()-cache.auditedAt>=AUDIT_INTERVAL) {
+        historical={};
         // Completed pairs existing before the full scan are only a boundary;
         // open begins remain decoded and rechecked until their matching done.
         for(const [name,file] of list) {
@@ -207,12 +255,11 @@ export class RemoteIndex {
           const completion=list.get(done);
           if(completion) {historical[name]=fingerprint(file);historical[done]=fingerprint(completion);}
         }
-      } else if(Object.entries(historical).some(([name,value])=>!list!.has(name) || fingerprint(list!.get(name)!)!==value)) {
-        historical={};force=true;this.log("历史记录发生变化，重新完整校验");
       }
-      if(cache && Object.entries(cache.events).some(([name,item])=>!list!.has(name) || fingerprint(list!.get(name)!)!==item.fingerprint)) {
-        force=true;this.log("历史变更记录被删除或修改，重新完整校验后重建游标");
-      }
+      // If most records are open, no bounded cursor can safely replace them.
+      // Audit without advancing it; the next round must inspect actual files
+      // again until the backlog can be decoded or completed pairs can be folded.
+      if(unreadLegacy()>LEGACY_DOWNLOAD_LIMIT) throw new Error("未完成变更记录较多，本轮完整校验目录并保留原索引游标");
       events=await this.events(new Map([...list].filter(([name])=>!(name in historical))),cache);
     } catch(e:any) {
       if(e.message==="SYNC_YIELD_FOR_CONFLICT") throw e;
@@ -227,7 +274,7 @@ export class RemoteIndex {
       // Only a validated journal captured BEFORE the scan can advance the cursor.
       // Open begins are rechecked on every later round; new commits remain unseen.
       if(events) {
-        const original:Cache={version:1,scope:this.scope,auditedAt:Date.now(),files,events,historical};
+        const original:Cache={version:2,scope:this.scope,auditedAt:Date.now(),files,events,historical,rolling};
         const compacted=this.compactCompleted(original);
         const snapshot:Cache={...compacted.cache,compactedAt:Date.now()};
         await this.save(snapshot);
@@ -235,7 +282,7 @@ export class RemoteIndex {
       }
       return {files,incremental:false,changed:files.length};
     }
-    const changed=new Set<string>();
+    const changed=new Set<string>(rollingDelta.paths);
     for(const [name,item] of Object.entries(events)) {
       if(!cache.events[name] || (item.event.phase==="begin" && !events[(name.startsWith("v2/") ? "v2/" : "")+item.event.id+".done.json"])) for(const path of item.event.paths) changed.add(path);
     }
@@ -250,15 +297,15 @@ export class RemoteIndex {
       if(actual) files.set(absolute,actual); else files.delete(absolute);
     }
     const result=[...files.values()];
-    let next:Cache={...cache,files:result,events,historical};
+    let next:Cache={...cache,version:2,files:result,events,historical,rolling};
     if(Date.now()-(cache.compactedAt || cache.auditedAt)>=COMPACTION_INTERVAL) {
       const compacted=this.compactCompleted(next);
-      if(compacted.count) {
+      if(compacted.count || Object.keys(rolling).length) {
         const candidate={...compacted.cache,compactedAt:Date.now()};
         try {
           await this.publishSnapshot(candidate);
           next=candidate;
-          this.log(`已将 ${compacted.count} 组已完成变更合并到快照，旧记录保留`);
+          this.log(`已更新云端索引快照，合并 ${compacted.count} 组旧变更；设备日志自动限容，旧记录保留`);
         } catch {this.log("定期合并快照失败，保留原有记录并在后续同步重试");}
       }
     }
@@ -271,32 +318,11 @@ export class RemoteIndex {
   async mutateMany<T>(paths:string[],operation:()=>Promise<T>):Promise<T> {
     if(!paths.length) return operation();
     if(!paths.every(validPath)) throw new Error("非法的同步变更路径");
-    const groups:{id:string;paths:string[];bytes:number}[]=[];
-    for(const path of [...new Set(paths)]) {
-      let group=groups[groups.length-1];
-      const pathBytes=new TextEncoder().encode(JSON.stringify(path)).byteLength+1;
-      if(!group || group.paths.length>=10000 || group.bytes+pathBytes>999000) {
-        group={id:Array.from(globalThis.crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2,"0")).join(""),paths:[],bytes:2};groups.push(group);
-      }
-      group.paths.push(path);group.bytes+=pathBytes;
-    }
     const legacyDir=toRemotePath(this.root,INDEX_DIR);
     const dir=toRemotePath(this.root,NEXT_INDEX_DIR);
     await this.client.createDirectory(this.root);
     await this.client.createDirectory(legacyDir);
     await this.client.createDirectory(dir);
-    const publish=async(group:typeof groups[number],phase:"begin"|"done")=>{
-      const event:Event={version:1,id:group.id,phase,paths:group.paths};
-      await this.client.uploadFile(dir+"/"+group.id+"."+phase+".json",new TextEncoder().encode(JSON.stringify(event)).buffer);
-    };
-    const published:typeof groups=[];
-    try {
-      for(const group of groups) {await publish(group,"begin");published.push(group);}
-      return await operation(); // Every intent must succeed before ANY user-file mutation.
-    } finally {
-      for(const group of published) {
-        try {await publish(group,"done");} catch {this.log("变更提交记录未完成，后续会持续复查受影响文件");}
-      }
-    }
+    return new RollingJournal(this.app,this.client,dir,this.scope,validPath,this.log).mutate(paths,operation);
   }
 }

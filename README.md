@@ -1,12 +1,12 @@
 # Baidu Sync Safe — Obsidian 百度网盘安全双向同步插件
 
-> **安装前请先升级到 Obsidian 1.14.4 或以上。** Obsidian 1.13 等旧客户端可能安装到历史版 **Baidu Netdisk Sync**，并不代表已安装当前 **Baidu Sync Safe 2.0.2**。请先升级 Obsidian，再在社区插件页面更新；安装后到本插件设置顶部核对实际版本。手动安装请覆盖发布包中的 `main.js`、`manifest.json`、`styles.css`，保留 `data.json`、同步状态和备份。旧客户端不再提供历史版本兼容回退；已安装的旧插件不会因此自动升级。
+> **安装前请先升级到 Obsidian 1.14.4 或以上。** Obsidian 1.13 等旧客户端可能安装到历史版 **Baidu Netdisk Sync**，并不代表已安装当前 **Baidu Sync Safe 2.1.2**。请先升级 Obsidian，再在社区插件页面更新；安装后到本插件设置顶部核对实际版本。手动安装请覆盖发布包中的 `main.js`、`manifest.json`、`styles.css`，保留 `data.json`、同步状态和备份。旧客户端不再提供历史版本兼容回退；已安装的旧插件不会因此自动升级。
 
 
 <p align="center">
   <img src="https://img.shields.io/badge/Obsidian-v1.14.4+-purple?style=for-the-badge&logo=obsidian&logoColor=white" alt="Obsidian" />
   <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Android%20%7C%20iOS-blue?style=for-the-badge&logo=apple&logoColor=white" alt="Platform" />
-  <img src="https://img.shields.io/badge/Release-v1.0.9-emerald?style=for-the-badge" alt="Release" />
+  <img src="https://img.shields.io/badge/Release-v2.1.2-emerald?style=for-the-badge" alt="Release" />
   <img src="https://img.shields.io/badge/License-MIT-amber?style=for-the-badge" alt="License" />
 </p>
 
@@ -147,6 +147,23 @@ Obsidian 社区拥有非常丰富优秀的同步方案。每个方案都有其�
 <summary><b>为什么提示重新建立同步索引？旧索引没了吗？</b></summary>
 
 `remote-index.json` 是当前设备的网盘目录缓存，不是笔记，也不是保存同步基线和待处理冲突的 `sync-state.json`。上次完整校验超过 24 小时、手动执行完整校验、缓存校验失败、账号或路径发生变化，或远端变更记录异常时，插件会重新扫描并更新索引缓存。更新缓存不意味着笔记或同步基线被删除。远端变更记录多时，首次核对可能需要较久；请保持手机亮屏前台，查看进度中的记录数。不要手动删除这些文件来加速同步。
+</details>
+
+<details>
+<summary><b>V2 索引还会随着每次同步不断增加文件吗？</b></summary>
+
+新版在 `.baidu-sync-index-v1/v2/` 中复用 `device-<随机标识>.json`：正常情况下每台设备、每个仓库使用一个日志文件，最多保存最近 64 批变更，且不超过 256 KiB（长路径或大批次可能提前轮换）。笔记开始写入前登记变更，操作结束后更新完成状态；多个设备使用不同文件，同一设备的日志写入按顺序执行。设备标识保存在 Obsidian 的本机存储中，复制 `.obsidian` 配置目录不会复制标识。
+
+- 旧的 `*.begin.json` / `*.done.json` 原样保留，新版不再为正常同步新增这些文件。已有文件数量不会自动减少，兼容旧设备时仍需枚举它们。
+- 单轮遇到超过 128 条需要下载的旧记录时，改用目录分页校验：扫描前已完成的成对记录直接作为边界，不逐个下载 JSON。如果仍有大量未完成记录，则本轮完整校验且不推进索引游标，后续继续检查实际目录，避免遗漏迟到写入。
+- 在线设备继续增量检查；离线太久、日志缺失或回滚时，会完整校验实际目录。过大的单批变更也会明确要求完整校验，不会截断路径后继续使用不完整索引。
+- 完整校验重新核对目录，**不等于重新下载所有文件**。原有同步基线、冲突和文件内容仍按同步规则处理。
+- 上传结果无法确认或写入中途崩溃时，会保留原日志并改用新标识，避免迟到请求覆盖新日志。这类异常、清除本机存储或新增设备可能留下额外文件；未完成记录继续复查，不自动删除。
+- 建议所有设备一起更新。旧版不能解析新日志时会回退完整目录校验，无法享受这项优化。新格式快照使用独立版本号，旧版不会误用缺少后续变更的缓存。
+
+日志保存的是受影响路径，不是文件内容历史。这项优化不提供跨设备的同文件写锁，也不改变现有冲突处理规则。
+
+界面中的文件检查数量不等于网络请求次数：目录查询每页最多返回 1,000 项，完整校验按目录、按页请求；文件状态在本地逐项比较。实际文件传输和传输前的远端复核另有请求，不包含在索引查询次数中。
 </details>
 
 <details>

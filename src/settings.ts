@@ -480,7 +480,7 @@ export class BaiduSyncSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl).setName("增量同步索引")
-      .setDesc("默认开启：日常只检查变更记录和受影响目录；首次、索引异常或每 24 小时完整校验。旧版设备或直接在网盘修改的内容由完整校验发现。")
+      .setDesc("默认开启：设备日志最多保留最近 64 批变更、256 KiB，旧记录保留。日常只检查变更和受影响目录；首次、错过日志保留范围、索引异常或每 24 小时完整校验（不等于重新下载全部文件）。建议所有设备一起更新。")
       .addToggle(t=>t.setValue(this.plugin.settings.incrementalSync).onChange(async value=>{
         this.plugin.settings.incrementalSync=value;await this.plugin.saveSettings();
       }));

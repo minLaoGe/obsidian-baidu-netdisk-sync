@@ -23,20 +23,92 @@ class Disk {
   async list(dir) { return { files: [...this.files.keys()].filter(p => p.startsWith(dir + '/') && !p.slice(dir.length + 1).includes('/')), folders: [] }; }
   async trashLocal(p) { await this.remove(p); }
 }
-function appFor(disk) { return { vault: { configDir: '.custom', adapter: disk, getAbstractFileByPath: () => null } }; }
+function appFor(disk) {
+ disk.localStorage ||= new Map();
+ return { vault: { configDir: '.custom', adapter: disk, getAbstractFileByPath: () => null },
+  loadLocalStorage:key=>JSON.parse(JSON.stringify(disk.localStorage.get(key) ?? null)),
+  saveLocalStorage:(key,value)=>{if(value===null)disk.localStorage.delete(key);else disk.localStorage.set(key,JSON.parse(JSON.stringify(value)));} };
+}
 
 class Cloud {
  constructor(){this.files=new Map();this.dirs=new Set();this.calls=[];this.downloads=[];this.next=0;this.failUpload=null;this.failList=null;}
  put(path,text){const bytes=typeof text==='string'?enc.encode(text):new Uint8Array(text);const n=++this.next;this.files.set(path,{bytes,info:{path,fsId:String(n),md5:'hash'+n,size:bytes.length,serverMtime:n,isdir:0}});}
  async listFiles(root,recursive=true,shouldYield){if(shouldYield?.())throw Error('SYNC_YIELD_FOR_CONFLICT');this.calls.push([root,recursive]);if(this.failList?.(root))throw Error('listing failed');return [...this.files.values()].map(f=>f.info).concat([...this.dirs].map(path=>({path,isdir:1}))).filter(f=>f.path.startsWith(root+'/')&&(recursive||!f.path.slice(root.length+1).includes('/')));}
  async downloadFile(id){this.downloads.push(id);const f=[...this.files.values()].find(f=>f.info.fsId===id);if(!f)throw Error('missing cloud');return f.bytes.slice().buffer;}
- async uploadFile(path,data){if(this.failUpload?.(path))throw Error('upload failed');this.put(path,data);return {fsId:this.files.get(path).info.fsId,md5:this.files.get(path).info.md5};}
+ async uploadFile(path,data){if(this.failUpload?.(path,data))throw Error('upload failed');this.put(path,data);return {fsId:this.files.get(path).info.fsId,md5:this.files.get(path).info.md5};}
  async createDirectory(path){this.dirs.add(path);}
  async deleteFile(path){this.files.delete(path);}
  async deleteFiles(paths){for(const p of paths)this.files.delete(p);return new Map(paths.map(p=>[p,undefined]));}
 }
 function setup(){const disk=new Disk(),cloud=new Cloud(),logs=[];const app=appFor(disk);return{disk,cloud,logs,index:new RemoteIndex(app,cloud,'/root','account',m=>logs.push(m),()=>false),app};}
+function phaseIs(phase){return(p,data)=>p.endsWith('.'+phase+'.json') || (/\/device-[a-f0-9]{32}\.json$/.test(p)&&JSON.parse(dec.decode(data)).entries.at(-1).phase===phase);}
+function deviceFiles(cloud){return [...cloud.files.entries()].filter(([p])=>/\/device-[a-f0-9]{32}\.json$/.test(p));}
+// Keep regression coverage for retained v1/v2 pairs and older writers.
+async function legacyMutation(t,paths,operation){
+ const id=require('node:crypto').randomBytes(16).toString('hex'),dir='/root/'+INDEX_DIR+'/v2';
+ await t.cloud.createDirectory('/root/'+INDEX_DIR);await t.cloud.createDirectory(dir);
+ const publish=phase=>t.cloud.uploadFile(dir+'/'+id+'.'+phase+'.json',enc.encode(JSON.stringify({version:1,id,phase,paths})).buffer);
+ await publish('begin');try{return await operation();}finally{try{await publish('done');}catch{}}
+}
+// Use the production HTTP pagination logic while keeping data fully isolated.
+function pagedListings(t){
+ const requests=[],list=t.cloud.listFiles.bind(t.cloud),original=mock.requestUrl;
+ mock.requestUrl=async({url})=>{
+  const q=new URL(url).searchParams;assert.equal(q.get('method'),'list');
+  const dir=q.get('dir'),start=Number(q.get('start')),limit=Number(q.get('limit'));requests.push({dir,start});
+  const files=await list(dir,false);
+  return{json:{errno:0,list:files.slice(start,start+limit).map(f=>({path:f.path,fs_id:f.fsId||'dir',isdir:f.isdir,size:f.size,md5:f.md5,server_mtime:f.serverMtime/1000}))}};
+ };
+ const {BaiduClient}=load('src/api/baidu-client.ts');
+ const client=new BaiduClient({appKey:'test',secretKey:'test',accessToken:'test',refreshToken:'test',tokenExpiresAt:Date.now()+1e9});
+ t.cloud.listFiles=client.listFiles.bind(client);
+ return{requests,restore:()=>{mock.requestUrl=original;}};
+}
 (async()=>{
+ // 2,000 unchanged user files do not cause 2,000 remote requests. Count
+ // actual requestUrl calls, not just high-level listFiles invocations.
+ {
+  const t=setup(),http=pagedListings(t);
+  try {
+   await t.cloud.createDirectory('/root/docs');for(let i=0;i<2000;i++)t.cloud.put('/root/docs/'+i+'.md','data');
+   await t.index.mutate('docs/0.md',async()=>{});await t.index.inventory();
+   http.requests.length=0;t.cloud.downloads=[];
+   const r=await t.index.inventory();assert.equal(r.incremental,true);assert.equal(r.files.length,2000);
+   assert.equal(http.requests.length,2);assert.equal(t.cloud.downloads.length,0);
+   console.log('PASS: 2,000 unchanged notes = 2 index listing HTTP requests, 0 object downloads');
+  } finally{http.restore();}
+ }
+ // A warm device encountering 2,000 previously unseen completed records must
+ // audit via paginated directories rather than download every old JSON.
+ {
+  const t=setup(),http=pagedListings(t);
+  try {
+   await t.index.inventory();
+   for(let i=0;i<1000;i++)await legacyMutation(t,['note.md'],async()=>t.cloud.put('/root/note.md',String(i)));
+   http.requests.length=0;t.cloud.downloads=[];
+   const r=await t.index.inventory();assert.equal(r.incremental,false);assert.equal(r.files.length,1);
+   assert.equal(http.requests.length,10);assert.equal(t.cloud.downloads.length,0);
+   http.requests.length=0;assert.equal((await t.index.inventory()).incremental,true);
+   assert.equal(http.requests.length,4);assert.equal(t.cloud.downloads.length,0);
+   console.log('PASS: 2,000 unseen legacy records = 10 listing HTTP requests for catch-up, 4 on next round, 0 per-record downloads');
+   // History removal must establish a fresh boundary, not trigger audits forever.
+   t.cloud.files.delete([...t.cloud.files.keys()].find(p=>p.endsWith('.done.json')));
+   assert.equal((await t.index.inventory()).incremental,false);assert.equal((await t.index.inventory()).incremental,true);
+  } finally{http.restore();}
+ }
+ // Too many open intents are not discarded or saved as an incremental cursor.
+ // Repeated audits continue to observe late writes without 2,000 downloads.
+ {
+  const t=setup();await t.index.inventory();const key='.custom/plugins/baidu-sync/remote-index.json',before=await t.disk.read(key);
+  await t.cloud.createDirectory('/root/'+INDEX_DIR+'/v2');
+  for(let i=0;i<2000;i++){
+   const id=i.toString(16).padStart(32,'0');
+   t.cloud.put('/root/'+INDEX_DIR+'/v2/'+id+'.begin.json',JSON.stringify({version:1,id,phase:'begin',paths:['pending.md']}));
+  }
+  t.cloud.downloads=[];assert.equal((await t.index.inventory()).incremental,false);assert.equal(await t.disk.read(key),before);
+  t.cloud.put('/root/pending.md','late');const next=await t.index.inventory();assert.equal(next.incremental,false);assert(next.files.some(f=>f.path==='/root/pending.md'));
+  assert.equal(t.cloud.downloads.length,0);assert.equal(await t.disk.read(key),before);
+ }
  // A new device skips downloading pre-existing completed pairs, but reads
  // open intents and observes changes written during the first full scan.
  {
@@ -68,9 +140,9 @@ function setup(){const disk=new Disk(),cloud=new Cloud(),logs=[];const app=appFo
  // Timed compaction folds completed entries only and keeps all cloud files.
  {
   const t=setup();await t.index.inventory();
-  await t.index.mutate('done.md',async()=>t.cloud.put('/root/done.md','done'));
+  await legacyMutation(t,['done.md'],async()=>t.cloud.put('/root/done.md','done'));
   t.cloud.failUpload=p=>p.endsWith('.done.json');
-  await t.index.mutate('open.md',async()=>t.cloud.put('/root/open.md','open'));t.cloud.failUpload=null;
+  await legacyMutation(t,['open.md'],async()=>t.cloud.put('/root/open.md','open'));t.cloud.failUpload=null;
   const cachePath='.custom/plugins/baidu-sync/remote-index.json';const envelope=JSON.parse(await t.disk.read(cachePath));
   envelope.data.compactedAt=Date.now()-3601000;
   envelope.checksum=require('node:crypto').createHash('md5').update(JSON.stringify(envelope.data)).digest('hex');
@@ -85,7 +157,7 @@ function setup(){const disk=new Disk(),cloud=new Cloud(),logs=[];const app=appFo
  }
  // Failed snapshot publication retains event contents for retry.
  {
-  const t=setup();await t.index.inventory();await t.index.mutate('file.md',async()=>t.cloud.put('/root/file.md','a'));
+  const t=setup();await t.index.inventory();await legacyMutation(t,['file.md'],async()=>t.cloud.put('/root/file.md','a'));
   const key='.custom/plugins/baidu-sync/remote-index.json',e=JSON.parse(await t.disk.read(key));e.data.compactedAt=Date.now()-3601000;
   e.checksum=require('node:crypto').createHash('md5').update(JSON.stringify(e.data)).digest('hex');await t.disk.write(key,JSON.stringify(e));
   t.cloud.failUpload=p=>p.includes('/snapshots/');await t.index.inventory();
@@ -112,16 +184,16 @@ function setup(){const disk=new Disk(),cloud=new Cloud(),logs=[];const app=appFo
  assert.equal((await nested.index.inventory()).incremental,true);
  assert.equal(new SyncEngine(nested.app,()=>({ignoredPatterns:[]}),nested.cloud).shouldIgnore(INDEX_DIR+'/v2/snapshot.json'),true);
  // Failure to register intent prevents any note mutation.
- const y=setup();let mutated=false;y.cloud.failUpload=p=>p.endsWith('.begin.json');
+ const y=setup();let mutated=false;y.cloud.failUpload=phaseIs('begin');
  await assert.rejects(y.index.mutate('a.md',async()=>{mutated=true}));assert.equal(mutated,false);
  // Remote write succeeds but done publication fails: open intent keeps being inspected after restart.
- await y.index.inventory();y.cloud.failUpload=p=>p.endsWith('.done.json');
+ await y.index.inventory();y.cloud.failUpload=phaseIs('done');
  await y.index.mutate('a.md',async()=>y.cloud.put('/root/a.md','committed'));
  let pending=await y.index.inventory();assert.equal(pending.changed,1);assert.equal(pending.files.length,1);
  y.cloud.put('/root/a.md','late completion');y.cloud.calls=[];
  pending=await new RemoteIndex(y.app,y.cloud,'/root','account',()=>{},()=>false).inventory();assert.equal(pending.changed,1);assert(y.cloud.calls.some(([p,r])=>p==='/root'&&!r));
  // Deleted/modified history cannot silently advance the cursor; fallback is a complete audit.
- const event=[...x.cloud.files.keys()].find(p=>p.endsWith('.done.json'));x.cloud.files.delete(event);x.cloud.calls=[];
+ const event=deviceFiles(x.cloud)[0][0];x.cloud.files.delete(event);x.cloud.calls=[];
  assert.equal((await x.index.inventory()).incremental,false);assert(x.cloud.calls.some(([p,r])=>p==='/root'&&r));
  // Malformed/out-of-root paths and orphan commits trigger audit, never apply their assertions.
  const z=setup();await z.index.inventory();const id='a'.repeat(32);
@@ -148,18 +220,155 @@ function setup(){const disk=new Disk(),cloud=new Cloud(),logs=[];const app=appFo
  // Independently written devices create different names and both changes survive.
  const c=setup();await c.index.inventory();const second=new RemoteIndex(c.app,c.cloud,'/root','account',()=>{},()=>false);
  await Promise.all([c.index.mutate('one.md',async()=>c.cloud.put('/root/one.md','one')),second.mutate('two.md',async()=>c.cloud.put('/root/two.md','two'))]);
- assert.equal([...c.cloud.files.keys()].filter(p=>p.endsWith('.begin.json')).length,2);
+ assert.equal(deviceFiles(c.cloud).length,1,'same-device instances serialize and reuse their journal');
  assert.equal((await c.index.inventory()).changed,2);
  // Safety yield interrupts enumeration without returning partial results.
  await assert.rejects(new RemoteIndex(c.app,c.cloud,'/root','account',()=>{},()=>true).inventory(),/SYNC_YIELD/);
- // Batch intent count stays bounded; notes cannot start before every group is registered.
+ // One bounded intent contains the whole batch before any note changes.
  const batched=setup();const many=Array.from({length:450},(_,i)=>`folder/${i}.md`);
- await batched.index.mutateMany(many,async()=>{assert.equal([...batched.cloud.files.keys()].filter(p=>p.endsWith('.begin.json')).length,1)});
- assert.equal([...batched.cloud.files.keys()].filter(p=>p.endsWith('.done.json')).length,1);
- const batchRecord=[...batched.cloud.files.entries()].find(([p])=>p.includes('/v2/')&&p.endsWith('.begin.json'));assert.equal(JSON.parse(dec.decode(batchRecord[1].bytes)).paths.length,450);
+ await batched.index.mutateMany(many,async()=>{assert.equal(JSON.parse(dec.decode(deviceFiles(batched.cloud)[0][1].bytes)).entries.at(-1).phase,'begin')});
+ assert.equal(deviceFiles(batched.cloud).length,1);
+ const batchRecord=deviceFiles(batched.cloud)[0];assert.equal(JSON.parse(dec.decode(batchRecord[1].bytes)).entries.at(-1).paths.length,450);
  assert.equal((await batched.index.inventory()).incremental,false);assert.equal((await batched.index.inventory()).incremental,true);
- const abort=setup();const larger=Array.from({length:10001},(_,i)=>`folder/${i}.md`);let starts=0;abort.cloud.failUpload=p=>p.endsWith('.begin.json')&&++starts===2;
+ const abort=setup();const larger=Array.from({length:10001},(_,i)=>`folder/${i}.md`);abort.cloud.failUpload=phaseIs('begin');
  let ran=false;await assert.rejects(abort.index.mutateMany(larger,async()=>{ran=true}));assert.equal(ran,false);
+ // Growth is bounded by writers, not sync count; legacy records stay byte-identical.
+ {
+  const t=setup();await legacyMutation(t,['legacy.md'],async()=>t.cloud.put('/root/legacy.md','legacy'));
+  const old=[...t.cloud.files].filter(([p])=>p.endsWith('.begin.json')||p.endsWith('.done.json')).map(([p,f])=>[p,dec.decode(f.bytes)]);
+  await t.index.inventory();
+  for(let i=0;i<1000;i++)await t.index.mutate('changing.md',async()=>t.cloud.put('/root/changing.md',String(i)));
+  const records=deviceFiles(t.cloud);assert.equal(records.length,1);
+  const journal=JSON.parse(dec.decode(records[0][1].bytes));assert.equal(journal.entries.length,64);assert.equal(journal.entries.at(-1).sequence,1000);assert(records[0][1].bytes.length<=256*1024);
+  for(const [p,s] of old)assert.equal(dec.decode(t.cloud.files.get(p).bytes),s);
+  const missed=await t.index.inventory();assert.equal(missed.incremental,false,'missed window forces a complete audit');assert(missed.files.some(f=>f.path==='/root/changing.md'));
+  t.cloud.calls=[];t.cloud.downloads=[];assert.equal((await t.index.inventory()).incremental,true);assert.equal(t.cloud.downloads.length,0);assert(!t.cloud.calls.some(([,r])=>r));
+  const cache=JSON.parse(await t.disk.read('.custom/plugins/baidu-sync/remote-index.json')).data;
+  assert.equal(Object.keys(cache.historical).length,2);assert.equal(Object.keys(cache.rolling).length,1);assert.equal(Object.keys(cache.events).length,0);
+  console.log('PASS: 1,000 mutations use one bounded journal, retain legacy bytes, and keep historical fingerprints constant');
+ }
+ // Exactly 64 unseen batches remain incremental; 65 require an audit that
+ // still observes an update dropped from the retained window.
+ for(const count of [64,65]) {
+  const t=setup();await t.index.inventory();await t.index.mutate('anchor.md',async()=>t.cloud.put('/root/anchor.md','a'));await t.index.inventory();
+  for(let i=0;i<count;i++)await t.index.mutate(i===0?'oldest.md':'latest.md',async()=>t.cloud.put('/root/'+(i===0?'oldest.md':'latest.md'),String(i)));
+  const result=await t.index.inventory();assert.equal(result.incremental,count===64);assert(result.files.some(f=>f.path==='/root/oldest.md'));
+ }
+ // Online readers stay incremental across many rotations, including deletion.
+ {
+  const t=setup();await t.index.inventory();
+  for(let i=0;i<150;i++) {
+   await t.index.mutate('rolling.md',async()=>{if(i%2)t.cloud.files.delete('/root/rolling.md');else t.cloud.put('/root/rolling.md',String(i));});
+   const r=await t.index.inventory();assert.equal(r.incremental,true);assert.equal(r.files.some(f=>f.path==='/root/rolling.md'),i%2===0);
+  }
+  assert.equal(deviceFiles(t.cloud).length,1);
+ }
+ // Device-local identity survives a normal restart, but copying the entire
+ // vault (including plugin files) does not copy the writer identity.
+ {
+  const t=setup();await t.index.mutate('a.md',async()=>t.cloud.put('/root/a.md','a'));
+  const original=deviceFiles(t.cloud)[0][0];
+  const restarted=new RemoteIndex(appFor(t.disk),t.cloud,'/root','account',()=>{},()=>false);
+  await restarted.mutate('b.md',async()=>t.cloud.put('/root/b.md','b'));
+  assert.equal(deviceFiles(t.cloud).length,1);assert.equal(deviceFiles(t.cloud)[0][0],original);
+  const copy=new Disk();copy.files=new Map(t.disk.files);
+  const cloned=new RemoteIndex(appFor(copy),t.cloud,'/root','account',()=>{},()=>false);
+  await Promise.all([restarted.mutate('c.md',async()=>t.cloud.put('/root/c.md','c')),cloned.mutate('d.md',async()=>t.cloud.put('/root/d.md','d'))]);
+  assert.equal(deviceFiles(t.cloud).length,2);assert.equal((await restarted.inventory()).files.length,4);
+ }
+ // A crash during a note write must abandon the old identity; the open
+ // journal remains visible after the restarted writer has completed work.
+ {
+  const t=setup();await t.index.inventory();let release,entered;
+  const started=new Promise(r=>entered=r),waiting=new Promise(r=>release=r);
+  const pending=t.index.mutate('pending.md',async()=>{entered();await waiting;t.cloud.put('/root/pending.md','late');});
+  await started;assert.equal(t.disk.localStorage.size,0);
+  const restarted=new RemoteIndex(appFor(t.disk),t.cloud,'/root','account',()=>{},()=>false);
+  await restarted.mutate('new.md',async()=>t.cloud.put('/root/new.md','new'));
+  assert.equal(deviceFiles(t.cloud).length,2);
+  const before=await restarted.inventory();assert.equal(before.changed,2);
+  release();await pending;const after=await restarted.inventory();assert(after.files.some(f=>f.path==='/root/pending.md'));
+ }
+ // Restoring an older localStorage backup cannot overwrite a newer cloud
+ // prefix that other devices have not read yet.
+ {
+  const t=setup();await t.index.mutate('one.md',async()=>t.cloud.put('/root/one.md','one'));await t.index.inventory();
+  const oldStorage=new Map(t.disk.localStorage);
+  await t.index.mutate('two.md',async()=>t.cloud.put('/root/two.md','two'));
+  const [oldPath,oldFile]=deviceFiles(t.cloud)[0],oldBytes=dec.decode(oldFile.bytes);
+  t.disk.localStorage=oldStorage;
+  const restored=new RemoteIndex(appFor(t.disk),t.cloud,'/root','account',()=>{},()=>false);
+  await restored.mutate('three.md',async()=>t.cloud.put('/root/three.md','three'));
+  assert.equal(deviceFiles(t.cloud).length,2);assert.equal(dec.decode(t.cloud.files.get(oldPath).bytes),oldBytes);
+  const r=await restored.inventory();assert.equal(r.incremental,true);assert.equal(r.files.length,3);
+ }
+ // An ambiguous begin/done upload may reach the server much later. Its path
+ // is never reused, so it cannot roll back the replacement writer's history.
+ for(const failPhase of ['begin','done']) {
+  const t=setup();await t.index.inventory();let late;
+  t.cloud.failUpload=(p,data)=>{if(phaseIs(failPhase)(p,data)){late=[p,new Uint8Array(data).slice()];return true;}return false;};
+  if(failPhase==='begin')await assert.rejects(t.index.mutate('old.md',async()=>assert.fail('begin failed')));
+  else await t.index.mutate('old.md',async()=>t.cloud.put('/root/old.md','old'));
+  t.cloud.failUpload=null;
+  await t.index.mutate('new.md',async()=>t.cloud.put('/root/new.md','new'));
+  const replacement=deviceFiles(t.cloud).find(([p])=>p!==late[0]);assert(replacement);const bytes=dec.decode(replacement[1].bytes);
+  t.cloud.put(...late);assert.equal(dec.decode(t.cloud.files.get(replacement[0]).bytes),bytes);
+  const r=await t.index.inventory();assert(r.files.some(f=>f.path==='/root/new.md'));
+ }
+ // A rejected user operation is closed only after it settles, preserving any
+ // partial writes for other devices and allowing subsequent queued operations.
+ {
+  const t=setup();await t.index.inventory();
+  await assert.rejects(t.index.mutate('partial.md',async()=>{t.cloud.put('/root/partial.md','partial');throw Error('operation interrupted');}),/interrupted/);
+  await t.index.mutate('next.md',async()=>t.cloud.put('/root/next.md','next'));
+  const r=await t.index.inventory();assert.equal(r.changed,2);assert.equal(deviceFiles(t.cloud).length,1);
+ }
+ // Byte limits also bound long Unicode paths; a single oversized batch uses
+ // an explicit full-scan marker instead of silently dropping any paths.
+ {
+  const t=setup();await t.index.inventory();
+  const paths=Array.from({length:2000},(_,i)=>'附件/'.repeat(45)+i+'.md');
+  await t.index.mutateMany(paths,async()=>{const j=JSON.parse(dec.decode(deviceFiles(t.cloud)[0][1].bytes));assert.equal(j.entries.at(-1).fullScan,true);t.cloud.put('/root/'+paths.at(-1),'last');});
+  assert(deviceFiles(t.cloud)[0][1].bytes.length<=256*1024);
+  const result=await t.index.inventory();assert.equal(result.incremental,false);assert(result.files.some(f=>f.path==='/root/'+paths.at(-1)));
+  assert.equal((await t.index.inventory()).incremental,true);
+  // Byte-based eviction can shorten the window even before 64 batches.
+  const batch=paths.slice(0,250);
+  for(let i=0;i<5;i++)await t.index.mutateMany(batch,async()=>{});
+  const record=deviceFiles(t.cloud)[0][1];assert(record.bytes.length<=256*1024);assert(JSON.parse(dec.decode(record.bytes)).entries.length<6);
+  assert.equal((await t.index.inventory()).incremental,false);
+ }
+ // Listing during a write sees begin; a later done must recheck the path.
+ {
+  const t=setup();await t.index.inventory();
+  await t.index.mutate('during.md',async()=>{const r=await t.index.inventory();assert.equal(r.incremental,true);assert(!r.files.length);t.cloud.put('/root/during.md','after scan');});
+  const after=await t.index.inventory();assert.equal(after.changed,1);assert(after.files.some(f=>f.path==='/root/during.md'));
+ }
+ // A byte-limited window can evict a begin after a reader saw it. Even with
+ // no sequence gap, the old pending paths still need a final directory read.
+ {
+  const t=setup();await t.index.inventory();
+  const paths=Array.from({length:450},(_,i)=>'目录/'.repeat(45)+i+'.md');
+  await t.index.mutateMany(paths,async()=>{await t.index.inventory();t.cloud.put('/root/'+paths[0],'late');});
+  await t.index.mutateMany(paths.map(p=>'new/'+p),async()=>{});
+  const entries=JSON.parse(dec.decode(deviceFiles(t.cloud)[0][1].bytes)).entries;
+  assert.equal(entries.length,1,'first batch evicted by the byte limit');
+  const r=await t.index.inventory();assert.equal(r.incremental,true);assert(r.files.some(f=>f.path==='/root/'+paths[0]));
+ }
+ // Journal rollback, corruption and gaps fail closed; a failed complete scan
+ // must never replace the last known good local inventory.
+ for(const mode of ['rollback','malformed','gap','removed']) {
+  const t=setup();await t.index.inventory();await t.index.mutate('a.md',async()=>t.cloud.put('/root/a.md','a'));await t.index.inventory();
+  const [p,f]=deviceFiles(t.cloud)[0],old=f.bytes.slice();
+  await t.index.mutate('b.md',async()=>t.cloud.put('/root/b.md','b'));await t.index.inventory();
+  if(mode==='rollback')t.cloud.put(p,old);
+  if(mode==='malformed')t.cloud.put(p,'{bad');
+  if(mode==='removed')t.cloud.files.delete(p);
+  if(mode==='gap'){const j=JSON.parse(dec.decode(t.cloud.files.get(p).bytes));j.entries[1].sequence=5;t.cloud.put(p,JSON.stringify(j));}
+  const before=await t.disk.read('.custom/plugins/baidu-sync/remote-index.json');t.cloud.failList=root=>root==='/root';
+  await assert.rejects(t.index.inventory(),/listing failed/);assert.equal(await t.disk.read('.custom/plugins/baidu-sync/remote-index.json'),before);
+  t.cloud.failList=null;assert.equal((await t.index.inventory()).incremental,false);
+ }
  // Real engines, two isolated local vaults sharing one cloud: add, modify, clean delete, modify/delete conflict.
  {
   const cloud=new Cloud();cloud.put('/root/note.md','initial');

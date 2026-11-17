@@ -1512,7 +1512,7 @@ var BaiduSyncSettingTab = class extends import_obsidian3.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("\u589E\u91CF\u540C\u6B65\u7D22\u5F15").setDesc("\u9ED8\u8BA4\u5F00\u542F\uFF1A\u65E5\u5E38\u53EA\u68C0\u67E5\u53D8\u66F4\u8BB0\u5F55\u548C\u53D7\u5F71\u54CD\u76EE\u5F55\uFF1B\u9996\u6B21\u3001\u7D22\u5F15\u5F02\u5E38\u6216\u6BCF 24 \u5C0F\u65F6\u5B8C\u6574\u6821\u9A8C\u3002\u65E7\u7248\u8BBE\u5907\u6216\u76F4\u63A5\u5728\u7F51\u76D8\u4FEE\u6539\u7684\u5185\u5BB9\u7531\u5B8C\u6574\u6821\u9A8C\u53D1\u73B0\u3002").addToggle((t) => t.setValue(this.plugin.settings.incrementalSync).onChange(async (value) => {
+    new import_obsidian3.Setting(containerEl).setName("\u589E\u91CF\u540C\u6B65\u7D22\u5F15").setDesc("\u9ED8\u8BA4\u5F00\u542F\uFF1A\u8BBE\u5907\u65E5\u5FD7\u6700\u591A\u4FDD\u7559\u6700\u8FD1 64 \u6279\u53D8\u66F4\u3001256 KiB\uFF0C\u65E7\u8BB0\u5F55\u4FDD\u7559\u3002\u65E5\u5E38\u53EA\u68C0\u67E5\u53D8\u66F4\u548C\u53D7\u5F71\u54CD\u76EE\u5F55\uFF1B\u9996\u6B21\u3001\u9519\u8FC7\u65E5\u5FD7\u4FDD\u7559\u8303\u56F4\u3001\u7D22\u5F15\u5F02\u5E38\u6216\u6BCF 24 \u5C0F\u65F6\u5B8C\u6574\u6821\u9A8C\uFF08\u4E0D\u7B49\u4E8E\u91CD\u65B0\u4E0B\u8F7D\u5168\u90E8\u6587\u4EF6\uFF09\u3002\u5EFA\u8BAE\u6240\u6709\u8BBE\u5907\u4E00\u8D77\u66F4\u65B0\u3002").addToggle((t) => t.setValue(this.plugin.settings.incrementalSync).onChange(async (value) => {
       this.plugin.settings.incrementalSync = value;
       await this.plugin.saveSettings();
     }));
@@ -1964,6 +1964,137 @@ var HashCache = class {
   }
 };
 
+// src/sync/rolling-journal.ts
+var JOURNAL_ENTRIES = 64;
+var JOURNAL_BYTES = 256 * 1024;
+var JOURNAL_NAME = /^device-([a-f0-9]{32})\.json$/;
+var encode = (value) => new TextEncoder().encode(JSON.stringify(value));
+var randomId = () => Array.from(globalThis.crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
+function validateJournal(value, name, validPath2) {
+  const match = JOURNAL_NAME.exec(name);
+  if (!match || value?.version !== 2 || value.writer !== match[1] || !Array.isArray(value.entries) || !value.entries.length || value.entries.length > JOURNAL_ENTRIES || encode(value).byteLength > JOURNAL_BYTES) throw new Error("\u8BBE\u5907\u53D8\u66F4\u65E5\u5FD7\u683C\u5F0F\u6216\u5BB9\u91CF\u65E0\u6548");
+  const ids = /* @__PURE__ */ new Set();
+  for (let i = 0; i < value.entries.length; i++) {
+    const e = value.entries[i];
+    if (!e || !Number.isSafeInteger(e.sequence) || e.sequence < 1 || i > 0 && e.sequence !== value.entries[i - 1].sequence + 1 || typeof e.id !== "string" || !/^[a-f0-9]{32}$/.test(e.id) || ids.has(e.id) || e.phase !== "done" && !(e.phase === "begin" && i === value.entries.length - 1) || !Array.isArray(e.paths) || !e.paths.every(validPath2) || !(e.fullScan === true ? e.paths.length === 0 : e.fullScan === void 0 && e.paths.length > 0)) {
+      throw new Error("\u8BBE\u5907\u53D8\u66F4\u65E5\u5FD7\u4E0D\u8FDE\u7EED\u6216\u5305\u542B\u65E0\u6548\u8DEF\u5F84");
+    }
+    ids.add(e.id);
+  }
+  return value;
+}
+function journalChanges(previous, current) {
+  const paths = /* @__PURE__ */ new Set();
+  let audit = Object.keys(previous).some((name) => !Object.hasOwn(current, name));
+  const include = (entry) => {
+    if (entry.fullScan) audit = true;
+    for (const path of entry.paths) paths.add(path);
+  };
+  for (const [name, item] of Object.entries(current)) {
+    const before = previous[name]?.journal;
+    const entries = item.journal.entries;
+    const last = before?.entries[before.entries.length - 1];
+    if (!last) {
+      if (entries[0].sequence !== 1) audit = true;
+      for (const e of entries) include(e);
+    } else {
+      if (entries[0].sequence > last.sequence + 1 || entries[entries.length - 1].sequence < last.sequence) audit = true;
+      for (const old of before.entries) {
+        const retained = entries.find((e) => e.sequence === old.sequence);
+        if (retained && (retained.id !== old.id || JSON.stringify(retained.paths) !== JSON.stringify(old.paths) || retained.fullScan !== old.fullScan || old.phase === "done" && retained.phase !== "done")) audit = true;
+      }
+      if (last.phase === "begin") include(last);
+      for (const e of entries) if (e.sequence > last.sequence || e.phase === "begin" || e.sequence === last.sequence && last.phase === "begin") include(e);
+    }
+  }
+  return { paths, audit };
+}
+var RollingJournal = class {
+  constructor(app, client, directory, scope, validPath2, log) {
+    this.app = app;
+    this.client = client;
+    this.directory = directory;
+    this.scope = scope;
+    this.validPath = validPath2;
+    this.log = log;
+  }
+  mutate(paths, operation) {
+    const key = Symbol.for("baidu-sync.rolling-writers.v2");
+    const host = globalThis;
+    const registry = host[key] || (host[key] = /* @__PURE__ */ new WeakMap());
+    let states = registry.get(this.app);
+    if (!states) {
+      states = /* @__PURE__ */ new Map();
+      registry.set(this.app, states);
+    }
+    const storageKey = "baidu-sync-journal-" + calculateMd5(encode([this.directory, this.scope]).buffer);
+    let state = states.get(storageKey);
+    if (!state) {
+      state = { loaded: false, tail: Promise.resolve() };
+      states.set(storageKey, state);
+    }
+    const writer = state;
+    const run = writer.tail.catch(() => void 0).then(() => this.write(writer, storageKey, paths, operation));
+    writer.tail = run.catch(() => void 0);
+    return run;
+  }
+  async write(state, key, paths, operation) {
+    if (typeof this.app.loadLocalStorage !== "function" || typeof this.app.saveLocalStorage !== "function") {
+      throw new Error("\u5F53\u524D Obsidian \u4E0D\u652F\u6301\u8BBE\u5907\u72EC\u7ACB\u7D22\u5F15\u5B58\u50A8\uFF0C\u8BF7\u5347\u7EA7 Obsidian \u540E\u540C\u6B65");
+    }
+    if (!state.loaded) {
+      const stored = this.app.loadLocalStorage(key);
+      let candidate;
+      try {
+        if (stored) {
+          const journal2 = validateJournal(stored, `device-${stored.writer}.json`, this.validPath);
+          if (journal2.entries.every((e) => e.phase === "done")) candidate = journal2;
+        }
+      } catch {
+        this.log("\u672C\u673A\u65E5\u5FD7\u6E38\u6807\u65E0\u6548\uFF0C\u5C06\u4F7F\u7528\u65B0\u7684\u8BBE\u5907\u65E5\u5FD7\u5E76\u4FDD\u7559\u65E7\u8BB0\u5F55");
+      }
+      if (candidate) {
+        const path2 = `${this.directory}/device-${candidate.writer}.json`;
+        const remote = (await this.client.listFiles(this.directory, false)).find((f) => f.path === path2 && f.isdir === 0);
+        if (remote && remote.size > 0 && remote.size <= JOURNAL_BYTES) {
+          const bytes = await boundedInventoryRead(this.client.downloadFile(remote.fsId, remote.size));
+          if (bytes.byteLength === remote.size && new TextDecoder("utf-8", { fatal: true }).decode(bytes) === JSON.stringify(candidate)) {
+            state.journal = candidate;
+          }
+        }
+        if (!state.journal) this.log("\u672C\u673A\u65E5\u5FD7\u4E0E\u4E91\u7AEF\u4E0D\u4E00\u81F4\uFF0C\u4FDD\u7559\u539F\u65E5\u5FD7\u5E76\u4F7F\u7528\u65B0\u6807\u8BC6\uFF0C\u907F\u514D\u8986\u76D6\u8F83\u65B0\u7684\u53D8\u66F4");
+      }
+      state.loaded = true;
+    }
+    const previous = state.journal;
+    const sequence = previous ? previous.entries[previous.entries.length - 1].sequence + 1 : 1;
+    if (!Number.isSafeInteger(sequence)) throw new Error("\u8BBE\u5907\u65E5\u5FD7\u5E8F\u53F7\u8D85\u51FA\u8303\u56F4\uFF0C\u5DF2\u505C\u6B62\u5199\u5165");
+    let entry = { sequence, id: randomId(), phase: "begin", paths: [...new Set(paths)] };
+    let journal = { version: 2, writer: previous?.writer || randomId(), entries: [...previous?.entries || [], entry] };
+    if (encode({ ...journal, entries: [entry] }).byteLength > JOURNAL_BYTES) {
+      entry = { sequence, id: entry.id, phase: "begin", paths: [], fullScan: true };
+      journal.entries[journal.entries.length - 1] = entry;
+    }
+    while (journal.entries.length > JOURNAL_ENTRIES || encode(journal).byteLength > JOURNAL_BYTES) journal.entries.shift();
+    const path = `${this.directory}/device-${journal.writer}.json`;
+    this.app.saveLocalStorage(key, null);
+    state.journal = void 0;
+    await this.client.uploadFile(path, encode(journal).buffer);
+    try {
+      return await operation();
+    } finally {
+      journal = { ...journal, entries: journal.entries.map((e) => e === entry ? { ...e, phase: "done" } : e) };
+      try {
+        await this.client.uploadFile(path, encode(journal).buffer);
+        this.app.saveLocalStorage(key, journal);
+        state.journal = journal;
+      } catch {
+        this.log("\u8BBE\u5907\u65E5\u5FD7\u63D0\u4EA4\u672A\u786E\u8BA4\uFF1A\u4FDD\u7559\u65E7\u65E5\u5FD7\uFF0C\u4E0B\u6B21\u4F7F\u7528\u65B0\u65E5\u5FD7\uFF1B\u672A\u5B8C\u6210\u8DEF\u5F84\u5C06\u6301\u7EED\u590D\u67E5");
+      }
+    }
+  }
+};
+
 // src/sync/remote-index.ts
 var INDEX_DIR = ".baidu-sync-index-v1";
 var NEXT_INDEX_DIR = INDEX_DIR + "/v2";
@@ -1971,6 +2102,7 @@ var SNAPSHOT_DIR = INDEX_DIR + "/snapshots";
 var SNAPSHOT_LIMIT = 20 * 1024 * 1024;
 var AUDIT_INTERVAL = 24 * 60 * 60 * 1e3;
 var COMPACTION_INTERVAL = 60 * 60 * 1e3;
+var LEGACY_DOWNLOAD_LIMIT = 128;
 function validPath(path) {
   return typeof path === "string" && path.length > 0 && path.length <= 4096 && !/[\\\x00-\x1f]/.test(path) && normalizeVaultPath(path) === path && path.split("/").every((p) => p !== "." && p !== "..") && path !== INDEX_DIR && !path.startsWith(INDEX_DIR + "/") && path !== NEXT_INDEX_DIR && !path.startsWith(NEXT_INDEX_DIR + "/");
 }
@@ -2001,7 +2133,7 @@ var RemoteIndex = class {
     try {
       const d = envelope.data;
       if (!d || envelope.checksum !== calculateMd5(new TextEncoder().encode(JSON.stringify(d)).buffer)) return;
-      if (d.version !== 1 || d.scope !== this.scope || !Number.isFinite(d.auditedAt) || d.auditedAt > Date.now() || !Array.isArray(d.files) || !d.events || typeof d.events !== "object" || Array.isArray(d.events)) return;
+      if (d.version !== 1 && d.version !== 2 || d.scope !== this.scope || !Number.isFinite(d.auditedAt) || d.auditedAt > Date.now() || !Array.isArray(d.files) || !d.events || typeof d.events !== "object" || Array.isArray(d.events)) return;
       const paths = /* @__PURE__ */ new Set();
       for (const f of d.files) {
         const prefix = toRemotePath(this.root, "") + "/";
@@ -2013,6 +2145,13 @@ var RemoteIndex = class {
       for (const [name, item] of Object.entries(d.events)) {
         if (typeof item.fingerprint !== "string") return;
         validateEvent(item.event, name);
+      }
+      if (d.rolling !== void 0) {
+        if (d.version !== 2 || !d.rolling || typeof d.rolling !== "object" || Array.isArray(d.rolling)) return;
+        for (const [name, item] of Object.entries(d.rolling)) {
+          if (typeof item?.fingerprint !== "string") return;
+          validateJournal(item.journal, name, validPath);
+        }
       }
       return d;
     } catch {
@@ -2095,6 +2234,7 @@ var RemoteIndex = class {
     const base = toRemotePath(this.root, INDEX_DIR);
     const list = await this.client.listFiles(base, false, this.shouldYield);
     const map = /* @__PURE__ */ new Map();
+    const rolling = /* @__PURE__ */ new Map();
     let hasV2 = false;
     for (const f of list) {
       const name = f.path.slice(base.length + 1);
@@ -2110,11 +2250,30 @@ var RemoteIndex = class {
       const nested = toRemotePath(this.root, NEXT_INDEX_DIR);
       for (const f of await this.client.listFiles(nested, false, this.shouldYield)) {
         const name = f.path.slice(nested.length + 1);
+        if (f.isdir === 0 && f.path.startsWith(nested + "/") && JOURNAL_NAME.test(name) && f.size > 0 && f.size <= JOURNAL_BYTES) {
+          rolling.set(name, f);
+          continue;
+        }
         if (f.isdir || !f.path.startsWith(nested + "/") || !/^[a-f0-9]{32}\.(begin|done)\.json$/.test(name) || f.size > 1048576) throw new Error("\u6279\u91CF\u53D8\u66F4\u76EE\u5F55\u5305\u542B\u65E0\u6548\u8BB0\u5F55");
         map.set("v2/" + name, f);
       }
     }
-    return map;
+    return { legacy: map, rolling };
+  }
+  async rollingEvents(list, cache) {
+    const result = {};
+    for (const [name, file] of list) {
+      this.checkYield();
+      const previous = cache?.rolling?.[name];
+      if (previous?.fingerprint === fingerprint(file)) result[name] = previous;
+      else {
+        const bytes = await boundedInventoryRead(this.client.downloadFile(file.fsId, file.size));
+        if (bytes.byteLength !== file.size || bytes.byteLength > JOURNAL_BYTES) throw new Error("\u8BBE\u5907\u53D8\u66F4\u65E5\u5FD7\u5927\u5C0F\u4E0D\u4E00\u81F4");
+        const journal = validateJournal(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)), name, validPath);
+        result[name] = { fingerprint: fingerprint(file), journal };
+      }
+    }
+    return result;
   }
   async events(list, cache) {
     const events = {};
@@ -2179,10 +2338,34 @@ var RemoteIndex = class {
       }
     }
     let list, events;
+    let rolling = {};
+    let rollingDelta = { paths: /* @__PURE__ */ new Set(), audit: false };
     let historical = { ...cache?.historical };
     try {
-      list = await this.journal();
-      if (!cache) {
+      const journal = await this.journal();
+      list = journal.legacy;
+      rolling = await this.rollingEvents(journal.rolling, cache);
+      rollingDelta = journalChanges(cache?.rolling || {}, rolling);
+      if (rollingDelta.audit) {
+        force = true;
+        this.log("\u8BBE\u5907\u65E5\u5FD7\u5DF2\u8F6E\u6362\u3001\u7F3A\u5931\u6216\u9700\u8981\u5B8C\u6574\u6821\u9A8C\uFF0C\u91CD\u65B0\u626B\u63CF\u76EE\u5F55\u4EE5\u907F\u514D\u9057\u6F0F\u53D8\u66F4");
+      }
+      if (Object.entries(historical).some(([name, value]) => !list.has(name) || fingerprint(list.get(name)) !== value)) {
+        historical = {};
+        force = true;
+        this.log("\u5386\u53F2\u8BB0\u5F55\u53D1\u751F\u53D8\u5316\uFF0C\u91CD\u65B0\u5B8C\u6574\u6821\u9A8C");
+      }
+      if (cache && Object.entries(cache.events).some(([name, item]) => !list.has(name) || fingerprint(list.get(name)) !== item.fingerprint)) {
+        force = true;
+        this.log("\u5386\u53F2\u53D8\u66F4\u8BB0\u5F55\u88AB\u5220\u9664\u6216\u4FEE\u6539\uFF0C\u91CD\u65B0\u5B8C\u6574\u6821\u9A8C\u540E\u91CD\u5EFA\u6E38\u6807");
+      }
+      const unreadLegacy = () => [...list].filter(([name, file]) => historical[name] !== fingerprint(file) && cache?.events[name]?.fingerprint !== fingerprint(file)).length;
+      if (cache && unreadLegacy() > LEGACY_DOWNLOAD_LIMIT) {
+        force = true;
+        this.log("\u65E7\u683C\u5F0F\u53D8\u66F4\u8BB0\u5F55\u79EF\u538B\u8F83\u591A\uFF0C\u6539\u7528\u76EE\u5F55\u5206\u9875\u6821\u9A8C\uFF0C\u8DF3\u8FC7\u9010\u6761\u4E0B\u8F7D\u5DF2\u5B8C\u6210\u8BB0\u5F55");
+      }
+      if (!cache || force || Date.now() - cache.auditedAt >= AUDIT_INTERVAL) {
+        historical = {};
         for (const [name, file] of list) {
           if (!name.endsWith(".begin.json")) continue;
           const done = name.slice(0, -"begin.json".length) + "done.json";
@@ -2192,15 +2375,8 @@ var RemoteIndex = class {
             historical[done] = fingerprint(completion);
           }
         }
-      } else if (Object.entries(historical).some(([name, value]) => !list.has(name) || fingerprint(list.get(name)) !== value)) {
-        historical = {};
-        force = true;
-        this.log("\u5386\u53F2\u8BB0\u5F55\u53D1\u751F\u53D8\u5316\uFF0C\u91CD\u65B0\u5B8C\u6574\u6821\u9A8C");
       }
-      if (cache && Object.entries(cache.events).some(([name, item]) => !list.has(name) || fingerprint(list.get(name)) !== item.fingerprint)) {
-        force = true;
-        this.log("\u5386\u53F2\u53D8\u66F4\u8BB0\u5F55\u88AB\u5220\u9664\u6216\u4FEE\u6539\uFF0C\u91CD\u65B0\u5B8C\u6574\u6821\u9A8C\u540E\u91CD\u5EFA\u6E38\u6807");
-      }
+      if (unreadLegacy() > LEGACY_DOWNLOAD_LIMIT) throw new Error("\u672A\u5B8C\u6210\u53D8\u66F4\u8BB0\u5F55\u8F83\u591A\uFF0C\u672C\u8F6E\u5B8C\u6574\u6821\u9A8C\u76EE\u5F55\u5E76\u4FDD\u7559\u539F\u7D22\u5F15\u6E38\u6807");
       events = await this.events(new Map([...list].filter(([name]) => !(name in historical))), cache);
     } catch (e) {
       if (e.message === "SYNC_YIELD_FOR_CONFLICT") throw e;
@@ -2213,7 +2389,7 @@ var RemoteIndex = class {
       this.phase?.("\u5B8C\u6574\u6821\u9A8C\u76EE\u5F55\uFF0C\u5EFA\u7ACB\u540C\u6B65\u7D22\u5F15...");
       const files2 = (await this.client.listFiles(this.root, true, this.shouldYield)).filter((f) => f.isdir === 0 && !f.path.startsWith(toRemotePath(this.root, INDEX_DIR) + "/") && !f.path.startsWith(toRemotePath(this.root, NEXT_INDEX_DIR) + "/"));
       if (events) {
-        const original = { version: 1, scope: this.scope, auditedAt: Date.now(), files: files2, events, historical };
+        const original = { version: 2, scope: this.scope, auditedAt: Date.now(), files: files2, events, historical, rolling };
         const compacted = this.compactCompleted(original);
         const snapshot = { ...compacted.cache, compactedAt: Date.now() };
         await this.save(snapshot);
@@ -2225,7 +2401,7 @@ var RemoteIndex = class {
       }
       return { files: files2, incremental: false, changed: files2.length };
     }
-    const changed = /* @__PURE__ */ new Set();
+    const changed = new Set(rollingDelta.paths);
     for (const [name, item] of Object.entries(events)) {
       if (!cache.events[name] || item.event.phase === "begin" && !events[(name.startsWith("v2/") ? "v2/" : "") + item.event.id + ".done.json"]) for (const path of item.event.paths) changed.add(path);
     }
@@ -2241,15 +2417,15 @@ var RemoteIndex = class {
       else files.delete(absolute);
     }
     const result = [...files.values()];
-    let next = { ...cache, files: result, events, historical };
+    let next = { ...cache, version: 2, files: result, events, historical, rolling };
     if (Date.now() - (cache.compactedAt || cache.auditedAt) >= COMPACTION_INTERVAL) {
       const compacted = this.compactCompleted(next);
-      if (compacted.count) {
+      if (compacted.count || Object.keys(rolling).length) {
         const candidate = { ...compacted.cache, compactedAt: Date.now() };
         try {
           await this.publishSnapshot(candidate);
           next = candidate;
-          this.log(`\u5DF2\u5C06 ${compacted.count} \u7EC4\u5DF2\u5B8C\u6210\u53D8\u66F4\u5408\u5E76\u5230\u5FEB\u7167\uFF0C\u65E7\u8BB0\u5F55\u4FDD\u7559`);
+          this.log(`\u5DF2\u66F4\u65B0\u4E91\u7AEF\u7D22\u5F15\u5FEB\u7167\uFF0C\u5408\u5E76 ${compacted.count} \u7EC4\u65E7\u53D8\u66F4\uFF1B\u8BBE\u5907\u65E5\u5FD7\u81EA\u52A8\u9650\u5BB9\uFF0C\u65E7\u8BB0\u5F55\u4FDD\u7559`);
         } catch {
           this.log("\u5B9A\u671F\u5408\u5E76\u5FEB\u7167\u5931\u8D25\uFF0C\u4FDD\u7559\u539F\u6709\u8BB0\u5F55\u5E76\u5728\u540E\u7EED\u540C\u6B65\u91CD\u8BD5");
         }
@@ -2264,42 +2440,12 @@ var RemoteIndex = class {
   async mutateMany(paths, operation) {
     if (!paths.length) return operation();
     if (!paths.every(validPath)) throw new Error("\u975E\u6CD5\u7684\u540C\u6B65\u53D8\u66F4\u8DEF\u5F84");
-    const groups = [];
-    for (const path of [...new Set(paths)]) {
-      let group = groups[groups.length - 1];
-      const pathBytes = new TextEncoder().encode(JSON.stringify(path)).byteLength + 1;
-      if (!group || group.paths.length >= 1e4 || group.bytes + pathBytes > 999e3) {
-        group = { id: Array.from(globalThis.crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join(""), paths: [], bytes: 2 };
-        groups.push(group);
-      }
-      group.paths.push(path);
-      group.bytes += pathBytes;
-    }
     const legacyDir = toRemotePath(this.root, INDEX_DIR);
     const dir = toRemotePath(this.root, NEXT_INDEX_DIR);
     await this.client.createDirectory(this.root);
     await this.client.createDirectory(legacyDir);
     await this.client.createDirectory(dir);
-    const publish = async (group, phase) => {
-      const event = { version: 1, id: group.id, phase, paths: group.paths };
-      await this.client.uploadFile(dir + "/" + group.id + "." + phase + ".json", new TextEncoder().encode(JSON.stringify(event)).buffer);
-    };
-    const published = [];
-    try {
-      for (const group of groups) {
-        await publish(group, "begin");
-        published.push(group);
-      }
-      return await operation();
-    } finally {
-      for (const group of published) {
-        try {
-          await publish(group, "done");
-        } catch {
-          this.log("\u53D8\u66F4\u63D0\u4EA4\u8BB0\u5F55\u672A\u5B8C\u6210\uFF0C\u540E\u7EED\u4F1A\u6301\u7EED\u590D\u67E5\u53D7\u5F71\u54CD\u6587\u4EF6");
-        }
-      }
-    }
+    return new RollingJournal(this.app, this.client, dir, this.scope, validPath, this.log).mutate(paths, operation);
   }
 };
 
